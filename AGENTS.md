@@ -1,7 +1,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **Easy-Copy** (351 symbols, 587 relationships, 19 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **easy-copy** (360 symbols, 599 relationships, 19 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
@@ -24,10 +24,10 @@ This project is indexed by GitNexus as **Easy-Copy** (351 symbols, 587 relations
 
 | Resource | Use for |
 |----------|---------|
-| `gitnexus://repo/Easy-Copy/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/Easy-Copy/clusters` | All functional areas |
-| `gitnexus://repo/Easy-Copy/processes` | All execution flows |
-| `gitnexus://repo/Easy-Copy/process/{name}` | Step-by-step execution trace |
+| `gitnexus://repo/easy-copy/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/easy-copy/clusters` | All functional areas |
+| `gitnexus://repo/easy-copy/processes` | All execution flows |
+| `gitnexus://repo/easy-copy/process/{name}` | Step-by-step execution trace |
 
 ## CLI
 

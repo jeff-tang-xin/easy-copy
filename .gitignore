@@ -25,7 +25,7 @@ dist-ssr
 .ox
 .oxroot
 CLAUDE.md
-AGENT.md
+AGENTS.md
 .claude
 .gitnexus
 .vscode

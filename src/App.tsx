@@ -269,6 +269,7 @@ function App() {
 
   // Search highlight
   const searchRef = useRef("");
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   // Image viewer zoom & pan state
   const [imageZoom, setImageZoom] = useState(1);
@@ -464,6 +465,23 @@ function App() {
     const el = document.querySelector(`.item-card.selected`);
     el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }, [selectedIndex]);
+
+  // Auto-focus window & search input when mouse enters from another app
+  useEffect(() => {
+    const handleMouseEnter = async () => {
+      try {
+        const win = getCurrentWindow();
+        if (!(await win.isFocused())) {
+          await win.setFocus();
+          searchInputRef.current?.focus();
+        }
+      } catch (e) {
+        // ignore
+      }
+    };
+    document.addEventListener('mouseenter', handleMouseEnter);
+    return () => document.removeEventListener('mouseenter', handleMouseEnter);
+  }, []);
 
   const handleSearch = async (value: string) => {
     setSearch(value);
@@ -816,6 +834,7 @@ function App() {
         <div className="search-wrapper">
           <span className="search-icon"><IconSearch /></span>
           <input
+            ref={searchInputRef}
             className="search-input"
             type="text"
             placeholder="Search history & tags..."
