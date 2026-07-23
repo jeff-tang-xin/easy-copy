@@ -1,0 +1,406 @@
+/* ===== Tools App ===== */
+
+.tools-app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", Roboto, sans-serif;
+  font-size: 13px;
+  overflow: hidden;
+}
+
+/* ===== Tab Bar ===== */
+
+.tools-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 10px 16px 0;
+  background-color: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.tools-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 18px;
+  font-size: 13px;
+  font-weight: 500;
+  border: none;
+  border-radius: 8px 8px 0 0;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  position: relative;
+}
+
+.tools-tab:hover {
+  color: var(--text-primary);
+  background-color: var(--bg-hover);
+}
+
+.tools-tab.active {
+  color: var(--accent);
+  background-color: var(--bg-primary);
+}
+
+.tools-tab.active::after {
+  content: "";
+  position: absolute;
+  bottom: -1px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background-color: var(--accent);
+  border-radius: 2px;
+}
+
+.tools-tab-icon {
+  font-size: 15px;
+}
+
+/* ===== Content ===== */
+
+.tools-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+}
+
+.tools-tab-content {
+  max-width: 640px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ===== Card Sections ===== */
+
+.tools-section {
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  padding: 16px 18px;
+}
+
+.tools-section h3 {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tools-section h3::before {
+  content: "";
+  display: inline-block;
+  width: 3px;
+  height: 14px;
+  background-color: var(--accent);
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+/* ===== Inputs ===== */
+
+.tools-input {
+  width: 100%;
+  padding: 9px 13px;
+  font-size: 13px;
+  font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  outline: none;
+  transition: all 0.15s ease;
+  box-sizing: border-box;
+}
+
+.tools-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+.tools-input.invalid {
+  border-color: var(--red);
+}
+
+.tools-textarea {
+  width: 100%;
+  padding: 10px 13px;
+  font-size: 13px;
+  font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  resize: vertical;
+  outline: none;
+  transition: all 0.15s ease;
+  box-sizing: border-box;
+  line-height: 1.5;
+}
+
+.tools-textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+/* ===== Output ===== */
+
+.tools-output-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tools-output-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  background-color: var(--bg-tertiary);
+  border-radius: 6px;
+  transition: background-color 0.12s ease;
+}
+
+.tools-output-row:hover {
+  background-color: var(--bg-hover);
+}
+
+.tools-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  min-width: 56px;
+  flex-shrink: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.tools-code {
+  font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
+  font-size: 13px;
+  color: var(--text-primary);
+  flex: 1;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.tools-sub {
+  font-size: 10px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
+}
+
+.copy-btn {
+  padding: 3px 10px;
+  font-size: 11px;
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.12s ease;
+  font-weight: 500;
+}
+
+.copy-btn:hover {
+  background-color: var(--bg-hover);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.copy-btn:active {
+  transform: scale(0.95);
+}
+
+.tools-error {
+  color: var(--red);
+  font-size: 13px;
+  margin-top: 8px;
+  padding: 6px 10px;
+  background-color: var(--danger-bg);
+  border-radius: 6px;
+}
+
+.tools-hint {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+/* ===== Chips (shared presets) ===== */
+
+.cron-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.cron-preset-btn {
+  padding: 5px 13px;
+  font-size: 11px;
+  font-weight: 500;
+  border: 1px solid var(--border-color);
+  border-radius: 20px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.cron-preset-btn:hover {
+  background-color: var(--bg-hover);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* ===== Cron ===== */
+
+.cron-fields {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.cron-field {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.cron-field label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  text-align: center;
+}
+
+.cron-input {
+  text-align: center;
+  padding: 8px 4px;
+}
+
+.cron-description {
+  font-size: 14px;
+  font-weight: 500;
+  padding: 10px 14px;
+  background-color: var(--bg-tertiary);
+  border-radius: 8px;
+  margin-bottom: 8px;
+}
+
+.cron-expression {
+  padding: 7px 12px;
+  background-color: var(--bg-tertiary);
+  border-radius: 6px;
+}
+
+/* ===== Regex ===== */
+
+.regex-input-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.regex-slash {
+  font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
+  font-size: 20px;
+  color: var(--text-muted);
+}
+
+.regex-pattern-input {
+  flex: 1;
+}
+
+.regex-flags-input {
+  width: 56px;
+  text-align: center;
+}
+
+.regex-flags-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 8px;
+  line-height: 1.5;
+}
+
+.regex-match-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.regex-match-item {
+  padding: 8px 12px;
+  background-color: var(--bg-tertiary);
+  border-radius: 6px;
+  transition: background-color 0.12s ease;
+}
+
+.regex-match-item:hover {
+  background-color: var(--bg-hover);
+}
+
+.regex-match-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.regex-groups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.regex-group {
+  font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
+  font-size: 11px;
+  padding: 2px 8px;
+  background-color: var(--bg-primary);
+  border-radius: 4px;
+  color: var(--green);
+}
+
+.regex-highlighted {
+  font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  padding: 12px 14px;
+  background-color: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-x: auto;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.regex-match {
+  background-color: var(--accent-dim);
+  border-radius: 3px;
+  padding: 1px 3px;
+  color: var(--accent);
+  font-weight: 600;
+}

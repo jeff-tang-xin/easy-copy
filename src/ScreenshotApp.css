@@ -1,0 +1,301 @@
+/* ===== Screenshot App ===== */
+
+.screenshot-app {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: transparent;
+  z-index: 9999;
+  user-select: none;
+}
+
+/* ===== Canvas Wrapper ===== */
+
+.screenshot-canvas-wrapper {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  cursor: crosshair;
+}
+
+.screenshot-canvas-wrapper.cursor-cross { cursor: crosshair; }
+.screenshot-canvas-wrapper.cursor-text { cursor: text; }
+
+.screenshot-canvas {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+/* ===== Preview boxes (while dragging) ===== */
+
+.screenshot-rect-preview {
+  position: absolute;
+  border: 2px solid var(--accent, #3b82f6);
+  background: rgba(59, 130, 246, 0.08);
+  pointer-events: none;
+  z-index: 10;
+}
+
+.screenshot-region-preview {
+  position: absolute;
+  border: 2px dashed #3b82f6;
+  background: rgba(59, 130, 246, 0.06);
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+  z-index: 10;
+}
+
+/* ===== Text Input Popup ===== */
+
+.text-input-popup {
+  position: absolute;
+  display: flex;
+  gap: 6px;
+  z-index: 20;
+  background: var(--bg-secondary, #1e1e2e);
+  border: 1px solid var(--border-color, #333);
+  border-radius: 8px;
+  padding: 6px 8px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+}
+
+.text-input-field {
+  user-select: text;
+  -webkit-user-select: text;
+  padding: 6px 10px;
+  font-size: 14px;
+  border: 1px solid var(--border-color, #333);
+  border-radius: 6px;
+  background: var(--bg-primary, #11111b);
+  outline: none;
+  min-width: 180px;
+  line-height: 1.3;
+}
+
+.text-input-field:focus {
+  border-color: var(--accent, #3b82f6);
+  box-shadow: 0 0 0 2px var(--accent-dim, rgba(59,130,246,0.25));
+}
+
+.text-input-ok {
+  padding: 6px 12px;
+  font-size: 14px;
+  border: none;
+  border-radius: 6px;
+  background: var(--accent, #3b82f6);
+  color: #fff;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.text-input-ok:hover {
+  opacity: 0.85;
+}
+
+/* ===== Toolbar ===== */
+
+.screenshot-toolbar {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 6px 8px;
+  background: rgba(24, 24, 37, 0.82);
+  backdrop-filter: blur(18px) saturate(150%);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 14px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.45), 0 1px 0 rgba(255,255,255,0.05) inset;
+  flex-shrink: 0;
+  z-index: 30;
+}
+
+.sc-tool-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  font-size: 16px;
+  line-height: 1;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: rgba(230, 233, 245, 0.85);
+  cursor: pointer;
+  transition: background 0.14s ease, color 0.14s ease, transform 0.1s ease;
+}
+
+.sc-tool-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.sc-tool-btn:active { transform: scale(0.92); }
+
+.sc-tool-btn.active {
+  background: var(--accent, #3b82f6);
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.45);
+}
+
+.sc-save-btn:hover {
+  background: rgba(34, 197, 94, 0.2);
+  color: #22c55e;
+}
+
+.sc-copy-btn:hover {
+  background: rgba(59, 130, 246, 0.2);
+  color: #60a5fa;
+}
+
+.sc-cancel-btn:hover {
+  background: rgba(239, 68, 68, 0.2);
+  color: #ef4444;
+}
+
+.sc-toolbar-sep {
+  width: 1px;
+  height: 20px;
+  background: rgba(255, 255, 255, 0.1);
+  margin: 0 4px;
+  flex-shrink: 0;
+}
+
+/* Selection-phase hint bubble (shown before a region is chosen) */
+.sc-hint {
+  position: absolute;
+  left: 50%;
+  top: 24px;
+  transform: translateX(-50%);
+  padding: 8px 16px;
+  font-size: 13px;
+  color: #fff;
+  background: rgba(30, 30, 46, 0.88);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  z-index: 30;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* ===== Colour palette ===== */
+
+.sc-color-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.sc-color-dot {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25) inset;
+  transition: transform 0.12s ease, border-color 0.12s ease;
+}
+
+.sc-color-dot:hover { transform: scale(1.15); }
+
+.sc-color-dot.active {
+  border-color: var(--text-primary, #fff);
+  transform: scale(1.15);
+}
+
+/* ===== Stroke size ===== */
+
+.sc-size-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.sc-size-btn {
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  transition: background 0.14s ease;
+}
+
+.sc-size-btn:hover { background: rgba(255, 255, 255, 0.1); }
+
+.sc-size-btn.active {
+  background: var(--accent, #3b82f6);
+}
+
+.sc-size-dot {
+  display: block;
+  border-radius: 50%;
+  background: rgba(230, 233, 245, 0.85);
+}
+
+.sc-size-btn.active .sc-size-dot { background: #fff; }
+
+/* ===== Pinned (comparison) floating window ===== */
+
+.sc-pin-window {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary, #1e1e2e);
+  border: 1px solid var(--accent, #3b82f6);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.sc-pin-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 32px;
+  padding: 0 8px;
+  background: rgba(30, 30, 46, 0.95);
+  cursor: move;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.sc-pin-title {
+  font-size: 12px;
+  color: var(--text-secondary, #a6adc8);
+}
+
+.sc-pin-close {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary, #a6adc8);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.sc-pin-close:hover {
+  background: rgba(239, 68, 68, 0.2);
+  color: #ef4444;
+}
+
+.sc-pin-img {
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}

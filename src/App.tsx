@@ -1,9 +1,60 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { enable, isEnabled, disable } from "@tauri-apps/plugin-autostart";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+// Use PrismLight + register only the languages we need. Importing the full
+// `Prism` bundle pulls ~200 languages (multi-MB) and makes language switches
+// visibly janky, especially in Vite dev.
+import { PrismLight as SyntaxHighlighter } from "react-syntax-highlighter";
+import { oneDark, oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
+import json from "react-syntax-highlighter/dist/esm/languages/prism/json";
+import sql from "react-syntax-highlighter/dist/esm/languages/prism/sql";
+import xml from "react-syntax-highlighter/dist/esm/languages/prism/markup"; // xml == markup in Prism
+import java from "react-syntax-highlighter/dist/esm/languages/prism/java";
+import kotlin from "react-syntax-highlighter/dist/esm/languages/prism/kotlin";
+import csharp from "react-syntax-highlighter/dist/esm/languages/prism/csharp";
+import go from "react-syntax-highlighter/dist/esm/languages/prism/go";
+import rust from "react-syntax-highlighter/dist/esm/languages/prism/rust";
+import python from "react-syntax-highlighter/dist/esm/languages/prism/python";
+import javascript from "react-syntax-highlighter/dist/esm/languages/prism/javascript";
+import typescript from "react-syntax-highlighter/dist/esm/languages/prism/typescript";
+import c from "react-syntax-highlighter/dist/esm/languages/prism/c";
+import cpp from "react-syntax-highlighter/dist/esm/languages/prism/cpp";
+import php from "react-syntax-highlighter/dist/esm/languages/prism/php";
+import ruby from "react-syntax-highlighter/dist/esm/languages/prism/ruby";
+import bash from "react-syntax-highlighter/dist/esm/languages/prism/bash";
+import yaml from "react-syntax-highlighter/dist/esm/languages/prism/yaml";
+import css from "react-syntax-highlighter/dist/esm/languages/prism/css";
+SyntaxHighlighter.registerLanguage("json", json);
+SyntaxHighlighter.registerLanguage("sql", sql);
+SyntaxHighlighter.registerLanguage("xml", xml);
+SyntaxHighlighter.registerLanguage("markup", xml);
+SyntaxHighlighter.registerLanguage("java", java);
+SyntaxHighlighter.registerLanguage("kotlin", kotlin);
+SyntaxHighlighter.registerLanguage("csharp", csharp);
+SyntaxHighlighter.registerLanguage("go", go);
+SyntaxHighlighter.registerLanguage("rust", rust);
+SyntaxHighlighter.registerLanguage("python", python);
+SyntaxHighlighter.registerLanguage("javascript", javascript);
+SyntaxHighlighter.registerLanguage("typescript", typescript);
+SyntaxHighlighter.registerLanguage("c", c);
+SyntaxHighlighter.registerLanguage("cpp", cpp);
+SyntaxHighlighter.registerLanguage("php", php);
+SyntaxHighlighter.registerLanguage("ruby", ruby);
+SyntaxHighlighter.registerLanguage("bash", bash);
+SyntaxHighlighter.registerLanguage("yaml", yaml);
+SyntaxHighlighter.registerLanguage("css", css);
+import { format as formatSql } from "sql-formatter";
 import "./App.css";
+
+// Module-level constant so React doesn't see a new object each render.
+const CODE_CUSTOM_STYLE = { margin: 0, background: "transparent", fontSize: 13 } as const;
+// Bail out of syntax highlighting for very large payloads — Prism tokenising
+// a huge minified blob will freeze the main thread for seconds.
+const HIGHLIGHT_MAX_CHARS = 100_000;
 
 /* ===== SVG Icon Components ===== */
 const IconSearch = () => (
@@ -13,22 +64,9 @@ const IconSearch = () => (
   </svg>
 );
 
-const IconStar = ({ filled }: { filled: boolean }) => (
-  <svg width="15" height="15" viewBox="0 0 16 16" fill={filled ? "currentColor" : "none"}>
-    <path d="M8 1.2l2.05 4.16 4.6.67-3.33 3.24.79 4.58L8 11.69l-4.11 2.16.79-4.58L1.35 6.43l4.6-.67L8 1.2z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
-  </svg>
-);
-
 const IconTrash = () => (
   <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
     <path d="M3 4h10M6 4V2.5h4V4M5 4l.5 9.5h5L11 4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-  </svg>
-);
-
-const IconTag = () => (
-  <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-    <path d="M2.5 8.5L8 3l5.5 5.5L8 14z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
-    <circle cx="6" cy="6.5" r="1" fill="currentColor" />
   </svg>
 );
 
@@ -153,6 +191,25 @@ const IconCopy = () => (
   </svg>
 );
 
+// Supported syntax-highlight languages the user can pick manually.
+const PREVIEW_LANGUAGES = [
+  'text', 'markdown', 'json', 'sql', 'xml', 'markup',
+  'java', 'kotlin', 'csharp', 'go', 'rust', 'python',
+  'javascript', 'typescript', 'c', 'cpp', 'php', 'ruby',
+  'bash', 'yaml', 'css',
+] as const;
+type PreviewLang = typeof PREVIEW_LANGUAGES[number];
+
+// Try to pretty-format content when we're confident (JSON / SQL). Returns
+// original string otherwise.
+function formatContent(text: string, lang: PreviewLang): string {
+  try {
+    if (lang === 'json') return JSON.stringify(JSON.parse(text), null, 2);
+    if (lang === 'sql') return formatSql(text, { language: 'sql', keywordCase: 'upper' });
+  } catch { /* ignore */ }
+  return text;
+}
+
 type ItemType = "Text" | "Image" | "Files";
 
 interface ClipboardItem {
@@ -162,6 +219,7 @@ interface ClipboardItem {
   timestamp: string;
   favorite: boolean;
   tags: string[];
+  saved_as_note?: boolean;
 }
 
 interface ImageCache {
@@ -171,6 +229,11 @@ interface ImageCache {
 interface AppConfig {
   max_items: number;
   poll_interval_ms: number;
+  clipboard_shortcut: string;
+  notes_shortcut: string;
+  tools_shortcut: string;
+  screenshot_shortcut: string;
+  copy_on_double_click: boolean;
 }
 
 interface ContextMenuState {
@@ -230,16 +293,12 @@ function App() {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [imageCache, setImageCache] = useState<ImageCache>({});
   const imageCacheRef = useRef<ImageCache>({});
-  const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
   const [enlargedImage, setEnlargedImage] = useState<string | null>(null);
+  // Text preview modal
+  const [previewItem, setPreviewItem] = useState<ClipboardItem | null>(null);
+  const [previewLang, setPreviewLang] = useState<PreviewLang>('text');
   const [autoStartEnabled, setAutoStartEnabled] = useState(false);
   const [toast, setToast] = useState<{ msg: string; type: "success" | "error" } | null>(null);
-
-  // Tag state
-  const [tagInputId, setTagInputId] = useState<string | null>(null);
-  const [tagInputValue, setTagInputValue] = useState("");
-  const [tagFilter, setTagFilter] = useState<string | null>(null);
-  const [allTags, setAllTags] = useState<string[]>([]);
 
   // Executable file confirmation dialog
   const [execConfirm, setExecConfirm] = useState<{ path: string } | null>(null);
@@ -262,7 +321,16 @@ function App() {
 
   // Settings panel
   const [showSettings, setShowSettings] = useState(false);
-  const [config, setConfig] = useState<AppConfig>({ max_items: 500, poll_interval_ms: 500 });
+  const configRef = useRef<AppConfig | null>(null);
+  const [config, setConfig] = useState<AppConfig>({
+    max_items: 500,
+    poll_interval_ms: 500,
+  clipboard_shortcut: "Ctrl+Shift+V",
+  notes_shortcut: "Ctrl+Shift+N",
+  tools_shortcut: "Ctrl+Shift+T",
+  screenshot_shortcut: "Ctrl+Shift+S",
+  copy_on_double_click: true,
+});
 
   // Context menu
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
@@ -270,6 +338,8 @@ function App() {
   // Search highlight
   const searchRef = useRef("");
   const searchInputRef = useRef<HTMLInputElement>(null);
+  // Debounce timer for search so we don't hit the backend on every keystroke.
+  const searchTimerRef = useRef<number | null>(null);
 
   // Image viewer zoom & pan state
   const [imageZoom, setImageZoom] = useState(1);
@@ -317,6 +387,8 @@ function App() {
     () => window.matchMedia('(prefers-color-scheme: dark)').matches
   );
   const theme = themeMode === 'auto' ? (systemDark ? 'dark' : 'light') : themeMode;
+  // Memoised so switching preview language doesn't rebuild the style object.
+  const codeStyle = useMemo(() => (theme === 'dark' ? oneDark : oneLight), [theme]);
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
@@ -340,6 +412,11 @@ function App() {
   // Check autostart status on mount
   useEffect(() => {
     isEnabled().then(setAutoStartEnabled).catch(() => {});
+  }, []);
+
+  // Load config once on mount so footer/hints reflect actual shortcuts
+  useEffect(() => {
+    invoke<AppConfig>("get_config").then((c) => { setConfig(c); configRef.current = c; }).catch(() => {});
   }, []);
 
   const handleToggleAutoStart = async () => {
@@ -403,8 +480,6 @@ function App() {
     history
       .filter((i) => i.type === "Image")
       .forEach((i) => loadImage(i.id));
-    const tags = await invoke<string[]>("get_all_tags");
-    setAllTags(tags);
     const [count, size] = await invoke<[number, number]>("get_stats");
     setStats({ count, size });
   }, [loadImage]);
@@ -418,6 +493,18 @@ function App() {
       unlisten.then((fn) => fn());
     };
   }, [refresh]);
+
+  // Intercept window close: hide instead of destroy so it can be reopened
+  useEffect(() => {
+    const win = getCurrentWindow();
+    const unlisten = win.onCloseRequested((event) => {
+      event.preventDefault();
+      win.hide();
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
 
   // Close image modal on Escape
   useEffect(() => {
@@ -434,6 +521,10 @@ function App() {
     const handler = (e: KeyboardEvent) => {
       // Don't interfere when image modal is open or user is typing in an input
       if (enlargedImage) return;
+      if (previewItem) {
+        if (e.key === 'Escape') setPreviewItem(null);
+        return;
+      }
       const target = e.target as HTMLElement;
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return;
 
@@ -452,7 +543,7 @@ function App() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [items, selectedIndex, enlargedImage]);
+  }, [items, selectedIndex, enlargedImage, previewItem]);
 
   // Reset selection when list changes
   useEffect(() => {
@@ -483,25 +574,35 @@ function App() {
     return () => document.removeEventListener('mouseenter', handleMouseEnter);
   }, []);
 
-  const handleSearch = async (value: string) => {
+  const handleSearch = (value: string) => {
+    // Keep the input responsive by updating the field immediately, but debounce
+    // the backend query (150ms) so fast typing doesn't fire an invoke per key.
     setSearch(value);
     searchRef.current = value;
-    if (value.trim()) {
-      const results = await invoke<ClipboardItem[]>("search_history", { query: value });
-      setItems(results);
-      results
-        .filter((i) => i.type === "Image")
-        .forEach((i) => loadImage(i.id));
-    } else {
-      refresh();
+    if (searchTimerRef.current !== null) {
+      clearTimeout(searchTimerRef.current);
     }
+    searchTimerRef.current = window.setTimeout(async () => {
+      // Ignore stale runs if the input changed again after this timer was set.
+      if (searchRef.current !== value) return;
+      if (value.trim()) {
+        const results = await invoke<ClipboardItem[]>("search_history", { query: value });
+        if (searchRef.current !== value) return;
+        setItems(results);
+        results
+          .filter((i) => i.type === "Image")
+          .forEach((i) => loadImage(i.id));
+      } else {
+        refresh();
+      }
+    }, 150);
   };
 
-  const handleCopy = async (id: string) => {
+  const handleCopy = useCallback(async (id: string) => {
     await invoke("copy_to_clipboard", { id });
     setCopiedId(id);
     setTimeout(() => setCopiedId(null), 1500);
-  };
+  }, []);
 
   const handleDelete = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -585,91 +686,7 @@ function App() {
     setExecConfirm(null);
   };
 
-  const handleToggleFavorite = async (id: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    await invoke("toggle_favorite", { id });
-    if (showFavoritesOnly) {
-      const favs = await invoke<ClipboardItem[]>("get_favorites");
-      setItems(favs);
-    } else if (search.trim()) {
-      const results = await invoke<ClipboardItem[]>("search_history", { query: search });
-      setItems(results);
-    } else {
-      refresh();
-    }
-  };
-
-  const handleToggleFavoritesFilter = async () => {
-    const next = !showFavoritesOnly;
-    setShowFavoritesOnly(next);
-    setSearch("");
-    if (next) {
-      const favs = await invoke<ClipboardItem[]>("get_favorites");
-      setItems(favs);
-    } else {
-      refresh();
-    }
-  };
-
-  const refreshAllTags = async () => {
-    const tags = await invoke<string[]>("get_all_tags");
-    setAllTags(tags);
-  };
-
-  const handleAddTag = async (id: string, e: React.KeyboardEvent) => {
-    if (e.key !== "Enter") return;
-    const tag = tagInputValue.trim();
-    if (!tag) {
-      setTagInputId(null);
-      setTagInputValue("");
-      return;
-    }
-    await invoke("add_tag", { id, tag });
-    setTagInputId(null);
-    setTagInputValue("");
-    refreshAllTags();
-    // Refresh current view
-    if (showFavoritesOnly) {
-      const favs = await invoke<ClipboardItem[]>("get_favorites");
-      setItems(favs);
-    } else if (search.trim()) {
-      const results = await invoke<ClipboardItem[]>("search_history", { query: search });
-      setItems(results);
-    } else {
-      refresh();
-    }
-  };
-
-  const handleRemoveTag = async (id: string, tag: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    await invoke("remove_tag", { id, tag });
-    refreshAllTags();
-    if (showFavoritesOnly) {
-      const favs = await invoke<ClipboardItem[]>("get_favorites");
-      setItems(favs);
-    } else if (search.trim()) {
-      const results = await invoke<ClipboardItem[]>("search_history", { query: search });
-      setItems(results);
-    } else {
-      refresh();
-    }
-  };
-
-  const handleTagClick = (tag: string) => {
-    setSearch(tag);
-    handleSearch(tag);
-  };
-
-  const handleTagFilterToggle = (tag: string) => {
-    if (tagFilter === tag) {
-      setTagFilter(null);
-      refresh();
-    } else {
-      setTagFilter(tag);
-      setSearch(tag);
-      handleSearch(tag);
-    }
-  };
+  // handleTagClick removed with tag UI
 
   // --- Incognito mode ---
   const handleToggleIncognito = async () => {
@@ -683,10 +700,12 @@ function App() {
   const loadConfig = async () => {
     const cfg = await invoke<AppConfig>("get_config");
     setConfig(cfg);
+    configRef.current = cfg;
   };
 
   const handleSaveConfig = async () => {
     await invoke("set_config", { config });
+    configRef.current = config;
     showToast("Settings saved");
     setShowSettings(false);
   };
@@ -784,8 +803,8 @@ function App() {
               <div
                 key={i}
                 className={`file-name clickable-path ${exec ? "is-exec" : ""}`}
-                title={exec ? `⚠ Executable file — click to open: ${f}` : `Click to open: ${f}`}
-                onClick={(e) => handleOpenFile(f, e)}
+                title={exec ? `⚠ Executable — Ctrl+Click to open: ${f}` : `Ctrl+Click to open: ${f}`}
+                onClick={(e) => { if (!e.ctrlKey) return; handleOpenFile(f, e); }}
               >
                 {exec && <span className="exec-indicator">⚠</span>}
                 {renderPath(f)}
@@ -814,9 +833,23 @@ function App() {
               className="url-link"
               onClick={(e) => {
                 e.stopPropagation();
-                invoke("open_file", { path: part.trim() });
+                if (e.ctrlKey) {
+                  invoke("open_url", { url: part.trim() });
+                } else {
+                  handleCopy(item.id);
+                }
               }}
-              title={`Open: ${part}`}
+              onContextMenu={(e) => {
+                // Ctrl+RightClick opens the URL in the default browser.
+                if (e.ctrlKey) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  invoke("open_url", { url: part.trim() })
+                    .then(() => showToast(`Opened: ${part.trim()}`, "success"))
+                    .catch((err) => showToast(`Failed: ${err}`, "error"));
+                }
+              }}
+              title={`Click to copy · Ctrl+Click / Ctrl+RightClick to open: ${part}`}
             >
               {part}
             </span>
@@ -844,15 +877,6 @@ function App() {
           />
         </div>
         {items.length > 0 && (
-          <button
-            className={`filter-btn ${showFavoritesOnly ? "active" : ""}`}
-            onClick={handleToggleFavoritesFilter}
-            title="Show favorites only"
-          >
-            <IconStar filled={showFavoritesOnly} />
-          </button>
-        )}
-        {items.length > 0 && (
           <button className="clear-btn" onClick={() => setClearConfirm(true)} title="Clear all">
             <IconTrash />
           </button>
@@ -868,20 +892,6 @@ function App() {
           <IconSettings />
         </button>
       </div>
-
-      {allTags.length > 0 && (
-        <div className="tag-bar">
-          {allTags.map((tag) => (
-            <span
-              key={tag}
-              className={`tag-chip ${tagFilter === tag ? "active" : ""}`}
-              onClick={() => handleTagFilterToggle(tag)}
-            >
-              {tag}
-            </span>
-          ))}
-        </div>
-      )}
 
       <div className="list-container">
         {items.length === 0 ? (
@@ -909,78 +919,25 @@ function App() {
                   {group.items.map(({ item, index }) => (
               <div
                 key={item.id}
-                className={`item-card ${item.type.toLowerCase()} ${item.favorite ? "favorited" : ""} ${index === selectedIndex ? "selected" : ""}`}
-                onClick={() => handleCopy(item.id)}
+                className={`item-card ${(item.type || 'text').toLowerCase()} ${index === selectedIndex ? "selected" : ""}`}
+                onClick={() => setSelectedIndex(index)}
                 onContextMenu={(e) => handleContextMenu(e, item.id)}
+                onDoubleClick={(e) => {
+                  e.stopPropagation();
+                  // Double-click copies by default (configurable).
+                  if (configRef.current?.copy_on_double_click !== false) {
+                    handleCopy(item.id);
+                  } else if (item.type === "Text") {
+                    setPreviewItem(item);
+                    setPreviewLang('text');
+                  }
+                }}
               >
                 <div className="item-content">{renderContent(item)}</div>
-                {(item.tags.length > 0 || tagInputId === item.id) && (
-                  <div className="item-tags">
-                    {item.tags.map((tag) => (
-                      <span key={tag} className="tag-badge" onClick={(e) => { e.stopPropagation(); handleTagClick(tag); }}>
-                        {tag}
-                        <span className="tag-remove" onClick={(e) => handleRemoveTag(item.id, tag, e)}>×</span>
-                      </span>
-                    ))}
-                    {tagInputId === item.id && (
-                      <div className="tag-input-wrapper">
-                        <input
-                          className="tag-input"
-                          type="text"
-                          value={tagInputValue}
-                          onChange={(e) => setTagInputValue(e.target.value)}
-                          onKeyDown={(e) => { e.stopPropagation(); handleAddTag(item.id, e); }}
-                          onBlur={() => { setTagInputId(null); setTagInputValue(""); }}
-                          placeholder="tag name..."
-                          autoFocus
-                        />
-                        {tagInputValue.trim() && (() => {
-                          const matches = allTags
-                            .filter((t) => t.toLowerCase().includes(tagInputValue.toLowerCase()) && !item.tags.includes(t))
-                            .slice(0, 5);
-                          if (matches.length === 0) return null;
-                          return (
-                            <div className="tag-suggestions">
-                              {matches.map((t) => (
-                                <span
-                                  key={t}
-                                  className="tag-suggestion-item"
-                                  onMouseDown={(e) => {
-                                    e.preventDefault();
-                                    invoke("add_tag", { id: item.id, tag: t });
-                                    setTagInputId(null);
-                                    setTagInputValue("");
-                                    refreshAllTags();
-                                    refresh();
-                                  }}
-                                >
-                                  {t}
-                                </span>
-                              ))}
-                            </div>
-                          );
-                        })()}
-                      </div>
-                    )}
-                  </div>
-                )}
                 <div className="item-meta">
                   <span className="item-type-badge"><TypeIcon type={item.type} /></span>
+                  {item.saved_as_note && <span className="item-saved-note" title="已存为笔记">📝</span>}
                   <span className="item-time">{formatTime(item.timestamp)}</span>
-                  <button
-                    className="tag-add-btn"
-                    onClick={(e) => { e.stopPropagation(); setTagInputId(item.id); setTagInputValue(""); }}
-                    title="Add tag"
-                  >
-                    <IconTag />
-                  </button>
-                  <button
-                    className={`fav-btn ${item.favorite ? "active" : ""}`}
-                    onClick={(e) => handleToggleFavorite(item.id, e)}
-                    title="Toggle favorite"
-                  >
-                    <IconStar filled={item.favorite} />
-                  </button>
                   <button
                     className="delete-btn"
                     onClick={(e) => handleDelete(item.id, e)}
@@ -1002,25 +959,67 @@ function App() {
       </div>
 
       <div className="footer">
-        <button
-          className={`autostart-btn ${autoStartEnabled ? "active" : ""}`}
-          onClick={handleToggleAutoStart}
-          title="Toggle auto-start on boot"
-        >
-          <IconPower />
-          <span>{autoStartEnabled ? "ON" : "OFF"}</span>
-        </button>
-        <button
-          className="theme-btn"
-          onClick={cycleTheme}
-          title={`Theme: ${themeMode}`}
-        >
-          {themeMode === 'auto' ? <IconAuto /> : themeMode === 'light' ? <IconSun /> : <IconMoon />}
-        </button>
-        <span className="footer-stats">
-          {stats.count} items{stats.size > 0 ? ` · ${formatSize(stats.size)}` : ""}
-        </span>
-        <span className="footer-hint">Ctrl+Shift+V</span>
+        <div className="footer-btn-group">
+          <button
+            className={`autostart-btn ${autoStartEnabled ? "active" : ""}`}
+            onClick={handleToggleAutoStart}
+            title="Toggle auto-start on boot"
+          >
+            <IconPower />
+            <span>{autoStartEnabled ? "ON" : "OFF"}</span>
+          </button>
+          <button
+            className="theme-btn"
+            onClick={cycleTheme}
+            title={`Theme: ${themeMode} (click to switch)`}
+          >
+            {themeMode === 'auto' ? <IconAuto /> : themeMode === 'light' ? <IconSun /> : <IconMoon />}
+          </button>
+          <button
+            className="notes-btn"
+            onClick={async () => {
+              try {
+                await invoke("open_notes_window");
+              } catch (e) {
+                showToast(`Failed: ${e}`, "error");
+              }
+            }}
+            title={`Open Notes (${config.notes_shortcut})`}
+          >
+            <span>📝 Notes</span>
+          </button>
+          <button
+            className="notes-btn"
+            onClick={async () => {
+              try {
+                await invoke("open_tools_window");
+              } catch (e) {
+                showToast(`Failed: ${e}`, "error");
+              }
+            }}
+            title="Open Dev Tools"
+          >
+            <span>🔧 Tools</span>
+          </button>
+          <button
+            className="notes-btn"
+            onClick={async () => {
+              try {
+                await invoke("trigger_screenshot");
+              } catch (e) {
+                showToast(`Failed: ${e}`, "error");
+              }
+            }}
+            title={`Take Screenshot (${config.screenshot_shortcut})`}
+          >
+            <span>📸 Screenshot</span>
+          </button>
+        </div>
+        <div className="footer-info-group">
+          <span className="footer-stats">
+            {stats.count} items{stats.size > 0 ? ` · ${formatSize(stats.size)}` : ""}
+          </span>
+        </div>
       </div>
 
       {enlargedImage && (
@@ -1067,6 +1066,70 @@ function App() {
           {toast.msg}
         </div>
       )}
+
+      {previewItem && (() => {
+        // Single-view preview. User picks language from a dropdown:
+        //   text     -> plain <pre>
+        //   markdown -> ReactMarkdown
+        //   others   -> Prism syntax highlight (json / sql are auto-formatted)
+        const lang = previewLang;
+        const raw = previewItem.content;
+        // Cheap early bail: super long content → force plain text regardless of picker.
+        const tooLong = raw.length > HIGHLIGHT_MAX_CHARS;
+        const effectiveLang: PreviewLang = tooLong ? 'text' : lang;
+        const rendered = (effectiveLang === 'json' || effectiveLang === 'sql')
+          ? formatContent(raw, effectiveLang)
+          : raw;
+        return (
+        <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setPreviewItem(null); }}>
+          <div className="preview-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="preview-header">
+              <div className="preview-lang-picker">
+                <label htmlFor="preview-lang-select">View as</label>
+                <select
+                  id="preview-lang-select"
+                  className="preview-lang-select"
+                  value={lang}
+                  onChange={(e) => setPreviewLang(e.target.value as PreviewLang)}
+                  disabled={tooLong}
+                  title={tooLong ? 'Content too large — highlight disabled' : undefined}
+                >
+                  {PREVIEW_LANGUAGES.map((l) => (
+                    <option key={l} value={l}>{l}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="preview-actions">
+                <button className="preview-btn" onClick={() => handleCopy(previewItem.id)} title="Copy"><IconCopy /></button>
+                <button className="preview-btn preview-close" onClick={() => setPreviewItem(null)} title="Close">×</button>
+              </div>
+            </div>
+            <div className="preview-body">
+              {effectiveLang === 'text' ? (
+                <pre className="preview-raw">{raw}</pre>
+              ) : effectiveLang === 'markdown' ? (
+                <div className="preview-markdown">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={(url) => url}>{raw}</ReactMarkdown>
+                </div>
+              ) : (
+                <div className="preview-code">
+                  <SyntaxHighlighter
+                    language={effectiveLang}
+                    style={codeStyle}
+                    customStyle={CODE_CUSTOM_STYLE}
+                  >
+                    {rendered}
+                  </SyntaxHighlighter>
+                </div>
+              )}
+            </div>
+            <div className="preview-footer">
+              <span>{previewItem.content.length} chars · {formatTime(previewItem.timestamp)} · {lang}</span>
+            </div>
+          </div>
+        </div>
+        );
+      })()}
 
       {execConfirm && (
         <div className="modal-overlay" onClick={handleExecCancel}>
@@ -1132,12 +1195,33 @@ function App() {
             <button className="ctx-item" onClick={() => { handleCopy(contextMenu.itemId); closeContextMenu(); }}>
               <IconCopy /> Copy
             </button>
-            <button className="ctx-item" onClick={() => { handleToggleFavorite(contextMenu.itemId, { stopPropagation: () => {} } as React.MouseEvent); closeContextMenu(); }}>
-              <IconStar filled={items.find(i => i.id === contextMenu.itemId)?.favorite ?? false} /> Toggle Favorite
-            </button>
-            <button className="ctx-item" onClick={() => { setTagInputId(contextMenu.itemId); setTagInputValue(""); closeContextMenu(); }}>
-              <IconTag /> Add Tag
-            </button>
+            {items.find(i => i.id === contextMenu.itemId)?.type === "Text" && (
+              <button className="ctx-item" onClick={() => {
+                const it = items.find(i => i.id === contextMenu.itemId);
+                if (it) { setPreviewItem(it); setPreviewLang('text'); }
+                closeContextMenu();
+              }}>
+                <IconText /> Preview
+              </button>
+            )}
+            {items.find(i => i.id === contextMenu.itemId) && (
+              <button className="ctx-item" disabled={items.find(i => i.id === contextMenu.itemId)?.saved_as_note} onClick={async () => {
+                const id = contextMenu.itemId;
+                closeContextMenu();
+                try {
+                  await invoke("create_note_from_clip", { clipId: id });
+                  await refresh();
+                  await invoke("open_notes_window");
+                  setToast({ msg: "已存为笔记", type: "success" });
+                  setTimeout(() => setToast(null), 1500);
+                } catch (err) {
+                  setToast({ msg: String(err), type: "error" });
+                  setTimeout(() => setToast(null), 2000);
+                }
+              }}>
+                <IconText /> {items.find(i => i.id === contextMenu.itemId)?.saved_as_note ? "✅ 已存为笔记" : "Save as Note"}
+              </button>
+            )}
             <div className="ctx-divider" />
             <button className="ctx-item ctx-danger" onClick={() => { handleDelete(contextMenu.itemId, { stopPropagation: () => {} } as React.MouseEvent); closeContextMenu(); }}>
               <IconTrash /> Delete
@@ -1172,6 +1256,50 @@ function App() {
                 max="5000"
                 value={config.poll_interval_ms}
                 onChange={(e) => setConfig({ ...config, poll_interval_ms: Math.max(200, parseInt(e.target.value) || 500) })}
+              />
+            </div>
+
+            <div className="settings-row">
+              <label className="settings-label">Clipboard Shortcut</label>
+              <input
+                className="settings-input"
+                type="text"
+                placeholder="Ctrl+Shift+V"
+                value={config.clipboard_shortcut}
+                onChange={(e) => setConfig({ ...config, clipboard_shortcut: e.target.value })}
+              />
+            </div>
+
+            <div className="settings-row">
+              <label className="settings-label">Notes Shortcut</label>
+              <input
+                className="settings-input"
+                type="text"
+                placeholder="Ctrl+Shift+N"
+                value={config.notes_shortcut}
+                onChange={(e) => setConfig({ ...config, notes_shortcut: e.target.value })}
+              />
+            </div>
+
+            <div className="settings-row">
+              <label className="settings-label">Tools Shortcut</label>
+              <input
+                className="settings-input"
+                type="text"
+                placeholder="Ctrl+Shift+T"
+                value={config.tools_shortcut}
+                onChange={(e) => setConfig({ ...config, tools_shortcut: e.target.value })}
+              />
+            </div>
+
+            <div className="settings-row">
+              <label className="settings-label">Screenshot Shortcut</label>
+              <input
+                className="settings-input"
+                type="text"
+                placeholder="Ctrl+Shift+S"
+                value={config.screenshot_shortcut}
+                onChange={(e) => setConfig({ ...config, screenshot_shortcut: e.target.value })}
               />
             </div>
 

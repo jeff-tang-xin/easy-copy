@@ -12,11 +12,47 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Easy Copy - Clipboard Manager",
         "width": 420,
         "height": 600,
         "resizable": true,
         "decorations": true,
+        "visible": true
+      },
+      {
+        "label": "notes",
+        "title": "Easy Copy - Notes",
+        "width": 960,
+        "height": 720,
+        "minWidth": 720,
+        "minHeight": 480,
+        "resizable": true,
+        "decorations": true,
+        "visible": false
+      },
+      {
+        "label": "tools",
+        "title": "Easy Copy - Dev Tools",
+        "width": 720,
+        "height": 680,
+        "minWidth": 600,
+        "minHeight": 500,
+        "resizable": true,
+        "decorations": true,
+        "visible": false
+      },
+      {
+        "label": "screenshot",
+        "title": "Easy Copy - Screenshot",
+        "width": 1920,
+        "height": 1080,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "shadow": false,
+        "fullscreen": true,
         "visible": false
       }
     ],

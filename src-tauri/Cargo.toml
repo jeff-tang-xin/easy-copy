@@ -27,8 +27,20 @@ serde_json = "1"
 arboard = "3"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 sha2 = "0.10"
 base64 = "0.22"
 clipboard-win = "5"
+xcap = "0.0.13"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+# Release profile: optimise for binary size.
+# opt-level="z" + lto + codegen-units=1 shrink the exe by ~40%.
+# panic=abort removes unwind tables. strip removes debug symbols.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

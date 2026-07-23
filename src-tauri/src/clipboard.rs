@@ -13,6 +13,81 @@ use tauri::{AppHandle, Emitter};
 
 use crate::models::{ClipboardItem, ItemType, AppConfig};
 
+/// Global clipboard access lock. Windows only allows one thread to hold the
+/// clipboard open at a time; the poll loop and any copy operation must not race
+/// or `OpenClipboard`/`SetClipboardData` fails with os error 1418.
+pub static CLIPBOARD_LOCK: Mutex<()> = Mutex::new(());
+
+/// Open an arboard clipboard with retries. arboard 3.x `new()` performs a single
+/// `OpenClipboard`; if another process/thread holds it the call fails outright.
+/// Retry a handful of times with a short backoff to survive transient contention.
+pub fn open_clipboard_retry() -> Result<Clipboard, String> {
+    let mut last_err = String::new();
+    for _ in 0..10 {
+        match Clipboard::new() {
+            Ok(cb) => return Ok(cb),
+            Err(e) => {
+                last_err = e.to_string();
+                thread::sleep(Duration::from_millis(30));
+            }
+        }
+    }
+    Err(format!("Failed to access clipboard after retries: {}", last_err))
+}
+
+/// Strip ANSI escape sequences (CSI, OSC, and standalone ESC) plus non-printable
+/// C0 control characters from text. Preserves \t \n \r.
+fn strip_ansi_escapes(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            match chars.peek().copied() {
+                Some('[') => {
+                    // CSI: ESC [ ... final-byte in 0x40..=0x7E
+                    chars.next();
+                    while let Some(&cc) = chars.peek() {
+                        chars.next();
+                        if ('\u{40}'..='\u{7e}').contains(&cc) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    // OSC: ESC ] ... BEL (0x07) or ST (ESC \)
+                    chars.next();
+                    while let Some(&cc) = chars.peek() {
+                        if cc == '\u{07}' {
+                            chars.next();
+                            break;
+                        }
+                        if cc == '\u{1b}' {
+                            chars.next();
+                            if chars.peek() == Some(&'\\') {
+                                chars.next();
+                            }
+                            break;
+                        }
+                        chars.next();
+                    }
+                }
+                Some(_) => {
+                    // Two-char ESC sequence: skip the following char
+                    chars.next();
+                }
+                None => {}
+            }
+            continue;
+        }
+        // Skip other C0 control characters, but preserve tab/newline/CR
+        if (c as u32) < 0x20 && c != '\t' && c != '\n' && c != '\r' {
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Convert arboard ImageData (RGBA) to PNG bytes.
 fn rgba_to_png(img: &arboard::ImageData) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
@@ -240,6 +315,8 @@ impl ClipboardManager {
     }
 
     pub fn copy_to_clipboard(&self, id: &str) -> Result<String, String> {
+        // Serialize with the poll loop to avoid Windows clipboard contention (1418).
+        let _guard = CLIPBOARD_LOCK.lock().unwrap();
         let item = {
             let items = self.items.lock().unwrap();
             items
@@ -266,7 +343,7 @@ impl ClipboardManager {
                 }
 
                 let mut clipboard =
-                    Clipboard::new().map_err(|e| format!("Failed to access clipboard: {}", e))?;
+                    open_clipboard_retry()?;
                 clipboard
                     .set_text(&item.content)
                     .map_err(|e| format!("Failed to set clipboard text: {}", e))?;
@@ -305,7 +382,7 @@ impl ClipboardManager {
                 }
 
                 let mut clipboard =
-                    Clipboard::new().map_err(|e| format!("Failed to access clipboard: {}", e))?;
+                    open_clipboard_retry()?;
                 clipboard
                     .set_image(img_data)
                     .map_err(|e| format!("Failed to set clipboard image: {}", e))?;
@@ -379,6 +456,16 @@ impl ClipboardManager {
 
     pub fn is_incognito(&self) -> bool {
         self.incognito.load(Ordering::Relaxed)
+    }
+
+    /// Toggle saved_as_note state for an item.
+    pub fn set_saved_as_note(&self, id: &str, saved: bool) {
+        let mut items = self.items.lock().unwrap();
+        if let Some(item) = items.iter_mut().find(|i| i.id == id) {
+            item.saved_as_note = saved;
+        }
+        drop(items);
+        self.save_to_disk();
     }
 
     /// Get current config.
@@ -524,11 +611,16 @@ impl ClipboardManager {
                 continue;
             }
 
+            // Hold the clipboard lock for the whole read cycle so a concurrent
+            // copy (set_text/set_image/set_files) can't collide → avoids 1418.
+            let _guard = CLIPBOARD_LOCK.lock().unwrap();
+
             // --- Check text ---
-            let text = match Clipboard::new() {
+            let raw_text = match Clipboard::new() {
                 Ok(mut cb) => cb.get_text().unwrap_or_default(),
                 Err(_) => continue,
             };
+            let text = strip_ansi_escapes(&raw_text);
 
             let trimmed = text.trim();
             if !trimmed.is_empty() {

@@ -29,4 +29,12 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
+
+  // 4. Each window's root is lazy-loaded in main.tsx, so Vite emits a separate
+  //    chunk per window (App / Notes / Tools / Screenshot) plus shared vendor
+  //    chunks (markdown / syntax-highlighter). Opening one window no longer
+  //    downloads the code for the others.
+  build: {
+    chunkSizeWarningLimit: 500,
+  },
 }));
