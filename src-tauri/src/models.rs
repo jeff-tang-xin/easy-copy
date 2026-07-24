@@ -184,3 +184,35 @@ impl Default for AppConfig {
         }
     }
 }
+
+/// Proxy configuration for the HTTP router.
+/// A single proxy routing rule.
+/// If path matches prefix, route to target.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxyRoute {
+    pub id: String,
+    pub path_prefix: String,
+    pub target: String,
+    pub enabled: bool,
+}
+
+/// Proxy configuration for the HTTP router.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxyConfig {
+    pub default_target: String,
+    pub port: u16,
+    pub running: bool,
+    pub routes: Vec<ProxyRoute>,
+}
+
+/// A single proxy request log entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxyLog {
+    pub id: String,
+    pub timestamp: i64,
+    pub method: String,
+    pub url: String,
+    pub route_match: Option<String>,
+    pub status: u16,
+    pub duration_ms: u64,
+}

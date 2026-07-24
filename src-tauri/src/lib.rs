@@ -140,7 +140,11 @@ async fn ip_lookup(target: Option<String>) -> Result<serde_json::Value, String> 
         }
         _ => "http://ip-api.com/json/".to_string(),
     };
-    let resp = reqwest::Client::new()
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| format!("Client build failed: {}", e))?;
+    let resp = client
         .get(&url)
         .header("User-Agent", "easy-copy/0.1")
         .send()
@@ -411,6 +415,348 @@ fn open_tools_window(app: tauri::AppHandle) -> Result<(), String> {
         }
         None => Err("tools window not found".to_string()),
     }
+}
+
+// ============================================================
+// Proxy commands
+// ============================================================
+
+/// Proxy manager state with routing rules
+struct ProxyState {
+    running: std::sync::atomic::AtomicBool,
+    default_target: std::sync::Mutex<String>,
+    routes: std::sync::Mutex<Vec<crate::models::ProxyRoute>>,
+    port: std::sync::atomic::AtomicU16,
+    logs: std::sync::Mutex<Vec<crate::models::ProxyLog>>,
+    shutdown_tx: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+impl Default for ProxyState {
+    fn default() -> Self {
+        Self {
+            running: std::sync::atomic::AtomicBool::new(false),
+            default_target: std::sync::Mutex::new("http://localhost:8080".to_string()),
+            routes: std::sync::Mutex::new(vec![
+                crate::models::ProxyRoute {
+                    id: "default_api".to_string(),
+                    path_prefix: "/api".to_string(),
+                    target: "http://localhost:3000".to_string(),
+                    enabled: true,
+                },
+                crate::models::ProxyRoute {
+                    id: "static_files".to_string(),
+                    path_prefix: "/static".to_string(),
+                    target: "http://localhost:4000".to_string(),
+                    enabled: true,
+                },
+            ]),
+            port: std::sync::atomic::AtomicU16::new(10880),
+            logs: std::sync::Mutex::new(Vec::new()),
+            shutdown_tx: std::sync::Mutex::new(None),
+        }
+    }
+}
+
+/// Match request path against routing rules and return the appropriate target
+fn match_route(path: &str, routes: &[crate::models::ProxyRoute]) -> (String, Option<String>) {
+    for route in routes {
+        if !route.enabled {
+            continue;
+        }
+        // Prefix match like nginx location
+        if path.starts_with(&route.path_prefix) {
+            return (route.target.clone(), Some(route.id.clone()));
+        }
+    }
+    (String::new(), None)
+}
+
+/// Start the HTTP proxy server on the given port with nginx-like routing
+#[tauri::command]
+fn start_proxy(
+    state: tauri::State<'_, std::sync::Arc<ProxyState>>,
+    port: u16,
+) -> Result<(), String> {
+    if state.running.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err("Proxy already running".to_string());
+    }
+
+    // Update the port so get_proxy_status reflects it
+    state.port.store(port, std::sync::atomic::Ordering::Relaxed);
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    *state.shutdown_tx.lock().unwrap() = Some(tx);
+
+    state.running.store(true, std::sync::atomic::Ordering::Relaxed);
+
+    // Bind with std::net first (no tokio runtime dependency) so we can
+    // return an error to the frontend immediately if the port is unavailable.
+    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+    let std_listener = match std::net::TcpListener::bind(addr) {
+        Ok(l) => l,
+        Err(e) => {
+            state.running.store(false, std::sync::atomic::Ordering::Relaxed);
+            return Err(format!("Failed to bind to port {}: {}", port, e));
+        }
+    };
+    // Required before converting to tokio::net::TcpListener
+    std_listener.set_nonblocking(true).unwrap();
+
+    let state_clone = state.inner().clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async move {
+            use axum::{body::Body, extract::Request, http::StatusCode, response::Response, Router};
+            use hyper_util::client::legacy::Client;
+            use hyper_util::rt::TokioExecutor;
+            use hyper_rustls::HttpsConnectorBuilder;
+            use std::time::Instant;
+            use uuid::Uuid;
+
+            // Convert std listener to tokio listener inside this runtime's reactor
+            let listener = match tokio::net::TcpListener::from_std(std_listener) {
+                Ok(l) => l,
+                Err(e) => {
+                    state_clone.running.store(false, std::sync::atomic::Ordering::Relaxed);
+                    *state_clone.shutdown_tx.lock().unwrap() = None;
+                    eprintln!("Proxy listener conversion failed: {}", e);
+                    return;
+                }
+            };
+
+            // rustls 0.23 requires a process-level CryptoProvider to be installed
+            // before any TLS operation. Both `ring` (via hyper-rustls) and
+            // `aws-lc-rs` (via reqwest) features may be present, so we must pick
+            // one explicitly. `install_default` is idempotent (ignores repeat calls).
+            let _ = rustls::crypto::ring::default_provider().install_default();
+
+            let https_connector = HttpsConnectorBuilder::new()
+                .with_webpki_roots()
+                .https_or_http()
+                .enable_http1()
+                .build();
+            let client: Client<_, Body> =
+                Client::builder(TokioExecutor::new()).build(https_connector);
+
+            let handler_state = state_clone.clone();
+            let app = Router::new().fallback(move |req: Request| {
+                let client = client.clone();
+                let state = handler_state.clone();
+                async move {
+                    let method = req.method().to_string();
+                    let uri = req.uri().to_string();
+                    let path = req.uri().path().to_string();
+                    let start = Instant::now();
+
+                    // Route matching: first match specific prefixes, then use default
+                    let (target, matched_route) = {
+                        let routes = state.routes.lock().unwrap();
+                        let default_target = state.default_target.lock().unwrap();
+                        let (route_target, route_id) = match_route(&path, &routes);
+                        if route_target.is_empty() {
+                            (default_target.clone(), None)
+                        } else {
+                            (route_target, route_id)
+                        }
+                    };
+
+                    // No matching route and no default target configured.
+                    if target.trim().is_empty() {
+                        let mut logs = state.logs.lock().unwrap();
+                        logs.push(crate::models::ProxyLog {
+                            id: Uuid::new_v4().to_string(),
+                            timestamp: chrono::Utc::now().timestamp_millis(),
+                            method: method.clone(),
+                            url: uri.clone(),
+                            route_match: None,
+                            status: 502,
+                            duration_ms: start.elapsed().as_millis() as u64,
+                        });
+                        return Response::builder()
+                            .status(StatusCode::BAD_GATEWAY)
+                            .body(Body::from(
+                                "No matching route and no default target configured",
+                            ))
+                            .unwrap();
+                    }
+
+                    // Normalize target: prepend http:// if the user omitted the scheme,
+                    // otherwise the URI has no authority and the client fails to connect.
+                    let target = if target.starts_with("http://") || target.starts_with("https://") {
+                        target
+                    } else {
+                        format!("http://{}", target)
+                    };
+                    let target_url = format!("{}{}", target.trim_end_matches('/'), uri);
+
+                    // Parse the target authority so we can rewrite the Host header.
+                    let target_host = target_url
+                        .parse::<axum::http::Uri>()
+                        .ok()
+                        .and_then(|u| u.authority().map(|a| a.as_str().to_string()));
+
+                    let mut builder = Request::builder().method(req.method()).uri(&target_url);
+                    for (key, value) in req.headers() {
+                        // Skip the original Host header; it points at the proxy itself and
+                        // many backends (Vite, nginx vhosts) reject a mismatched Host.
+                        if key == axum::http::header::HOST {
+                            continue;
+                        }
+                        builder = builder.header(key, value);
+                    }
+                    // Rewrite Host to the target's authority.
+                    if let Some(host) = target_host.as_ref() {
+                        builder = builder.header(axum::http::header::HOST, host);
+                    }
+                    let forwarded_req = match builder.body(req.into_body()) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            return Response::builder()
+                                .status(StatusCode::BAD_REQUEST)
+                                .body(Body::from(format!("Build request error: {}", e)))
+                                .unwrap();
+                        }
+                    };
+
+                    let push_log = |status: u16| {
+                        let mut logs = state.logs.lock().unwrap();
+                        logs.push(crate::models::ProxyLog {
+                            id: Uuid::new_v4().to_string(),
+                            timestamp: chrono::Utc::now().timestamp_millis(),
+                            method: method.clone(),
+                            url: target_url.clone(),
+                            route_match: matched_route.clone(),
+                            status,
+                            duration_ms: start.elapsed().as_millis() as u64,
+                        });
+                        if logs.len() > 100 {
+                            let excess = logs.len() - 100;
+                            logs.drain(0..excess);
+                        }
+                    };
+
+                    match client.request(forwarded_req).await {
+                        Ok(res) => {
+                            push_log(res.status().as_u16());
+                            res.map(Body::new)
+                        }
+                        Err(e) => {
+                            push_log(503);
+                            Response::builder()
+                                .status(StatusCode::BAD_GATEWAY)
+                                .body(Body::from(format!("Proxy error: {}", e)))
+                                .unwrap()
+                        }
+                    }
+                }
+            });
+
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    rx.await.ok();
+                })
+                .await;
+
+            // Cleanup after shutdown
+            state_clone.running.store(false, std::sync::atomic::Ordering::Relaxed);
+            *state_clone.shutdown_tx.lock().unwrap() = None;
+        });
+    });
+
+    Ok(())
+}
+
+/// Stop the HTTP proxy server
+#[tauri::command]
+fn stop_proxy(state: tauri::State<'_, std::sync::Arc<ProxyState>>) -> Result<(), String> {
+    if !state.running.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err("Proxy not running".to_string());
+    }
+    // Signal graceful shutdown to the axum server
+    if let Some(tx) = state.shutdown_tx.lock().unwrap().take() {
+        let _ = tx.send(());
+    }
+    state.running.store(false, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
+}
+
+/// Get proxy logs
+#[tauri::command]
+fn get_proxy_logs(
+    state: tauri::State<'_, std::sync::Arc<ProxyState>>,
+) -> Result<Vec<crate::models::ProxyLog>, String> {
+    Ok(state.logs.lock().unwrap().clone())
+}
+
+/// Clear proxy logs
+#[tauri::command]
+fn clear_proxy_logs(state: tauri::State<'_, std::sync::Arc<ProxyState>>) -> Result<(), String> {
+    state.logs.lock().unwrap().clear();
+    Ok(())
+}
+
+/// Get proxy status with routing rules
+#[tauri::command]
+fn get_proxy_status(
+    state: tauri::State<'_, std::sync::Arc<ProxyState>>,
+) -> Result<crate::models::ProxyConfig, String> {
+    Ok(crate::models::ProxyConfig {
+        default_target: state.default_target.lock().unwrap().clone(),
+        port: state.port.load(std::sync::atomic::Ordering::Relaxed),
+        running: state.running.load(std::sync::atomic::Ordering::Relaxed),
+        routes: state.routes.lock().unwrap().clone(),
+    })
+}
+
+/// Update proxy default target
+#[tauri::command]
+fn set_proxy_default_target(
+    state: tauri::State<'_, std::sync::Arc<ProxyState>>,
+    target: String,
+) -> Result<(), String> {
+    *state.default_target.lock().unwrap() = target;
+    Ok(())
+}
+
+/// Add or update a proxy route
+#[tauri::command]
+fn upsert_proxy_route(
+    state: tauri::State<'_, std::sync::Arc<ProxyState>>,
+    route: crate::models::ProxyRoute,
+) -> Result<(), String> {
+    let mut routes = state.routes.lock().unwrap();
+    if let Some(existing) = routes.iter_mut().find(|r| r.id == route.id) {
+        existing.path_prefix = route.path_prefix;
+        existing.target = route.target;
+        existing.enabled = route.enabled;
+    } else {
+        routes.push(route);
+    }
+    Ok(())
+}
+
+/// Delete a proxy route
+#[tauri::command]
+fn delete_proxy_route(
+    state: tauri::State<'_, std::sync::Arc<ProxyState>>,
+    route_id: String,
+) -> Result<(), String> {
+    let mut routes = state.routes.lock().unwrap();
+    routes.retain(|r| r.id != route_id);
+    Ok(())
+}
+
+/// Toggle a proxy route enabled status
+#[tauri::command]
+fn toggle_proxy_route(
+    state: tauri::State<'_, std::sync::Arc<ProxyState>>,
+    route_id: String,
+) -> Result<(), String> {
+    let mut routes = state.routes.lock().unwrap();
+    if let Some(route) = routes.iter_mut().find(|r| r.id == route_id) {
+        route.enabled = !route.enabled;
+    }
+    Ok(())
 }
 
 // ============================================================
@@ -700,6 +1046,9 @@ pub fn run() {
             note_manager.load();
             app.manage(note_manager);
 
+            // --- HTTP Proxy state ---
+            app.manage(std::sync::Arc::new(ProxyState::default()));
+
             // --- Global Shortcuts: register based on user config ---
             let cfg = manager.get_config();
             register_shortcuts(app.handle(), &cfg);
@@ -766,6 +1115,15 @@ pub fn run() {
             open_notes_window,
             open_note_preview,
             open_tools_window,
+            get_proxy_status,
+            set_proxy_default_target,
+            upsert_proxy_route,
+            delete_proxy_route,
+            toggle_proxy_route,
+            start_proxy,
+            stop_proxy,
+            get_proxy_logs,
+            clear_proxy_logs,
             capture_screenshot,
             trigger_screenshot,
             save_screenshot,

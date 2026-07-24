@@ -35,7 +35,7 @@ impl NoteManager {
             Err(_) => return,
         };
         if let Ok(loaded) = serde_json::from_str::<Vec<Note>>(&json) {
-            *self.notes.lock().unwrap() = loaded;
+            *self.notes.lock().unwrap_or_else(|e| e.into_inner()) = loaded;
         }
     }
 
@@ -48,7 +48,7 @@ impl NoteManager {
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let notes = self.notes.lock().unwrap();
+        let notes = self.notes.lock().unwrap_or_else(|e| e.into_inner());
         if let Ok(json) = serde_json::to_string_pretty(&*notes) {
             let _ = fs::write(path, json);
         }
@@ -56,7 +56,7 @@ impl NoteManager {
 
     /// Return notes sorted by (pinned desc, updated_at desc).
     pub fn list(&self) -> Vec<Note> {
-        let mut items: Vec<Note> = self.notes.lock().unwrap().clone();
+        let mut items: Vec<Note> = self.notes.lock().unwrap_or_else(|e| e.into_inner()).clone();
         items.sort_by(|a, b| {
             b.pinned
                 .cmp(&a.pinned)
@@ -67,13 +67,13 @@ impl NoteManager {
 
     pub fn create(&self, input: NoteInput, source_clip_id: Option<String>) -> Note {
         let note = Note::new(input, source_clip_id);
-        self.notes.lock().unwrap().push(note.clone());
+        self.notes.lock().unwrap_or_else(|e| e.into_inner()).push(note.clone());
         self.save();
         note
     }
 
     pub fn update(&self, id: &str, input: NoteInput) -> Option<Note> {
-        let mut notes = self.notes.lock().unwrap();
+        let mut notes = self.notes.lock().unwrap_or_else(|e| e.into_inner());
         let found = notes.iter_mut().find(|n| n.id == id).map(|n| {
             n.apply_update(input);
             n.clone()
@@ -86,7 +86,7 @@ impl NoteManager {
     }
 
     pub fn delete(&self, id: &str) {
-        let mut notes = self.notes.lock().unwrap();
+        let mut notes = self.notes.lock().unwrap_or_else(|e| e.into_inner());
         let before = notes.len();
         notes.retain(|n| n.id != id);
         let changed = notes.len() != before;
@@ -97,7 +97,7 @@ impl NoteManager {
     }
 
     pub fn toggle_pin(&self, id: &str) {
-        let mut notes = self.notes.lock().unwrap();
+        let mut notes = self.notes.lock().unwrap_or_else(|e| e.into_inner());
         let mut changed = false;
         if let Some(n) = notes.iter_mut().find(|n| n.id == id) {
             n.pinned = !n.pinned;
@@ -113,12 +113,12 @@ impl NoteManager {
     /// Convenience: get a single note by id.
     #[allow(dead_code)]
     pub fn get(&self, id: &str) -> Option<Note> {
-        self.notes.lock().unwrap().iter().find(|n| n.id == id).cloned()
+        self.notes.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|n| n.id == id).cloned()
     }
 
     /// Distinct, sorted list of categories across all notes.
     pub fn list_categories(&self) -> Vec<String> {
-        let notes = self.notes.lock().unwrap();
+        let notes = self.notes.lock().unwrap_or_else(|e| e.into_inner());
         let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for n in notes.iter() {
             if let Some(c) = &n.category {
@@ -137,7 +137,7 @@ impl NoteManager {
         let from = from.trim().to_string();
         let to_trim = to.trim().to_string();
         let new_val = if to_trim.is_empty() { None } else { Some(to_trim) };
-        let mut notes = self.notes.lock().unwrap();
+        let mut notes = self.notes.lock().unwrap_or_else(|e| e.into_inner());
         let mut count = 0usize;
         let now = chrono::Utc::now().timestamp_millis();
         for n in notes.iter_mut() {
@@ -165,7 +165,7 @@ impl NoteManager {
         if name.is_empty() {
             return 0;
         }
-        let mut notes = self.notes.lock().unwrap();
+        let mut notes = self.notes.lock().unwrap_or_else(|e| e.into_inner());
         let mut count = 0usize;
         let now = chrono::Utc::now().timestamp_millis();
         for n in notes.iter_mut() {

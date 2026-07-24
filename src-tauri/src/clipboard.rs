@@ -180,7 +180,7 @@ impl ClipboardManager {
         let _ = fs::create_dir_all(data_dir);
 
         // Save items as JSON
-        let items = self.items.lock().unwrap();
+        let items = self.items.lock().unwrap_or_else(|e| e.into_inner());
         let valid_ids: HashSet<String> = items
             .iter()
             .filter(|i| i.item_type == ItemType::Image)
@@ -194,7 +194,7 @@ impl ClipboardManager {
         // Save images as individual PNG files
         let images_dir = data_dir.join("images");
         let _ = fs::create_dir_all(&images_dir);
-        let images = self.images.lock().unwrap();
+        let images = self.images.lock().unwrap_or_else(|e| e.into_inner());
         for (id, png) in images.iter() {
             if valid_ids.contains(id) {
                 let _ = fs::write(images_dir.join(format!("{}.png", id)), png);
@@ -225,7 +225,7 @@ impl ClipboardManager {
         // Load items from JSON
         if let Ok(json) = fs::read_to_string(data_dir.join("history.json")) {
             if let Ok(items) = serde_json::from_str::<Vec<ClipboardItem>>(&json) {
-                let mut self_items = self.items.lock().unwrap();
+                let mut self_items = self.items.lock().unwrap_or_else(|e| e.into_inner());
                 *self_items = items;
             }
         }
@@ -233,7 +233,7 @@ impl ClipboardManager {
         // Load images from individual PNG files
         let images_dir = data_dir.join("images");
         if let Ok(entries) = fs::read_dir(&images_dir) {
-            let mut images = self.images.lock().unwrap();
+            let mut images = self.images.lock().unwrap_or_else(|e| e.into_inner());
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().and_then(|e| e.to_str()) == Some("png") {
@@ -248,7 +248,7 @@ impl ClipboardManager {
     }
 
     pub fn get_items(&self) -> Vec<ClipboardItem> {
-        let mut items = self.items.lock().unwrap().clone();
+        let mut items = self.items.lock().unwrap_or_else(|e| e.into_inner()).clone();
         items.sort_by(|a, b| b.favorite.cmp(&a.favorite).then_with(|| b.timestamp.cmp(&a.timestamp)));
         items
     }
@@ -257,7 +257,7 @@ impl ClipboardManager {
         let query_lower = query.to_lowercase();
         let mut results: Vec<ClipboardItem> = self.items
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .filter(|item| {
                 item.content.to_lowercase().contains(&query_lower)
@@ -271,7 +271,7 @@ impl ClipboardManager {
 
     /// Insert an item at the head, dedup by content+type, truncate if needed.
     fn insert_item(&self, item: ClipboardItem) {
-        let mut items = self.items.lock().unwrap();
+        let mut items = self.items.lock().unwrap_or_else(|e| e.into_inner());
 
         // Dedup: if same content+type exists, move it to top with fresh timestamp
         if let Some(pos) = items.iter().position(|i| i.content == item.content && i.item_type == item.item_type) {
@@ -282,7 +282,7 @@ impl ClipboardManager {
             items.insert(0, item);
         }
 
-        let max = *self.max_items.lock().unwrap();
+        let max = *self.max_items.lock().unwrap_or_else(|e| e.into_inner());
         if items.len() > max {
             let removed: Vec<String> = items[max..]
                 .iter()
@@ -291,7 +291,7 @@ impl ClipboardManager {
             items.truncate(max);
             drop(items);
             if !removed.is_empty() {
-                let mut images = self.images.lock().unwrap();
+                let mut images = self.images.lock().unwrap_or_else(|e| e.into_inner());
                 for id in removed {
                     images.remove(&id);
                 }
@@ -304,7 +304,7 @@ impl ClipboardManager {
     }
 
     pub fn get_image_data(&self, id: &str) -> Option<String> {
-        let images = self.images.lock().unwrap();
+        let images = self.images.lock().unwrap_or_else(|e| e.into_inner());
         images.get(id).map(|png| {
             use base64::Engine;
             format!(
@@ -318,7 +318,7 @@ impl ClipboardManager {
         // Serialize with the poll loop to avoid Windows clipboard contention (1418).
         let _guard = CLIPBOARD_LOCK.lock().unwrap();
         let item = {
-            let items = self.items.lock().unwrap();
+            let items = self.items.lock().unwrap_or_else(|e| e.into_inner());
             items
                 .iter()
                 .find(|item| item.id == id)
@@ -330,15 +330,15 @@ impl ClipboardManager {
             ItemType::Text => {
                 // Update last_text, clear other trackers
                 {
-                    let mut last = self.last_text.lock().unwrap();
+                    let mut last = self.last_text.lock().unwrap_or_else(|e| e.into_inner());
                     *last = item.content.clone();
                 }
                 {
-                    let mut last = self.last_image_hash.lock().unwrap();
+                    let mut last = self.last_image_hash.lock().unwrap_or_else(|e| e.into_inner());
                     last.clear();
                 }
                 {
-                    let mut last = self.last_files.lock().unwrap();
+                    let mut last = self.last_files.lock().unwrap_or_else(|e| e.into_inner());
                     last.clear();
                 }
 
@@ -351,7 +351,7 @@ impl ClipboardManager {
             ItemType::Image => {
                 // Get PNG data
                 let png_data = {
-                    let images = self.images.lock().unwrap();
+                    let images = self.images.lock().unwrap_or_else(|e| e.into_inner());
                     images
                         .get(&item.id)
                         .cloned()
@@ -369,15 +369,15 @@ impl ClipboardManager {
                 let hash = format!("{:x}", hasher.finalize());
 
                 {
-                    let mut last = self.last_image_hash.lock().unwrap();
+                    let mut last = self.last_image_hash.lock().unwrap_or_else(|e| e.into_inner());
                     *last = hash;
                 }
                 {
-                    let mut last = self.last_text.lock().unwrap();
+                    let mut last = self.last_text.lock().unwrap_or_else(|e| e.into_inner());
                     last.clear();
                 }
                 {
-                    let mut last = self.last_files.lock().unwrap();
+                    let mut last = self.last_files.lock().unwrap_or_else(|e| e.into_inner());
                     last.clear();
                 }
 
@@ -392,15 +392,15 @@ impl ClipboardManager {
 
                 // Update last_files, clear other trackers
                 {
-                    let mut last = self.last_files.lock().unwrap();
+                    let mut last = self.last_files.lock().unwrap_or_else(|e| e.into_inner());
                     *last = files.clone();
                 }
                 {
-                    let mut last = self.last_text.lock().unwrap();
+                    let mut last = self.last_text.lock().unwrap_or_else(|e| e.into_inner());
                     last.clear();
                 }
                 {
-                    let mut last = self.last_image_hash.lock().unwrap();
+                    let mut last = self.last_image_hash.lock().unwrap_or_else(|e| e.into_inner());
                     last.clear();
                 }
 
@@ -412,16 +412,16 @@ impl ClipboardManager {
     }
 
     pub fn delete_item(&self, id: &str) {
-        let mut items = self.items.lock().unwrap();
+        let mut items = self.items.lock().unwrap_or_else(|e| e.into_inner());
         items.retain(|item| item.id != id);
         drop(items);
-        self.images.lock().unwrap().remove(id);
+        self.images.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
         self.save_to_disk();
     }
 
     /// Restore a previously deleted item.
     pub fn restore_item(&self, item: ClipboardItem) {
-        let mut items = self.items.lock().unwrap();
+        let mut items = self.items.lock().unwrap_or_else(|e| e.into_inner());
         // Avoid duplicate if item already exists
         if !items.iter().any(|i| i.id == item.id) {
             items.push(item);
@@ -433,7 +433,7 @@ impl ClipboardManager {
 
     /// Get stats: item count and total storage size in bytes.
     pub fn get_stats(&self) -> (usize, u64) {
-        let count = self.items.lock().unwrap().len();
+        let count = self.items.lock().unwrap_or_else(|e| e.into_inner()).len();
         let mut size: u64 = 0;
         if let Some(ref dir) = self.data_dir {
             if let Ok(entries) = std::fs::read_dir(dir) {
@@ -460,7 +460,7 @@ impl ClipboardManager {
 
     /// Toggle saved_as_note state for an item.
     pub fn set_saved_as_note(&self, id: &str, saved: bool) {
-        let mut items = self.items.lock().unwrap();
+        let mut items = self.items.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(item) = items.iter_mut().find(|i| i.id == id) {
             item.saved_as_note = saved;
         }
@@ -470,13 +470,13 @@ impl ClipboardManager {
 
     /// Get current config.
     pub fn get_config(&self) -> AppConfig {
-        self.config.lock().unwrap().clone()
+        self.config.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Update config (max_items, poll_interval) and persist.
     pub fn set_config(&self, config: AppConfig) {
-        *self.max_items.lock().unwrap() = config.max_items;
-        *self.config.lock().unwrap() = config.clone();
+        *self.max_items.lock().unwrap_or_else(|e| e.into_inner()) = config.max_items;
+        *self.config.lock().unwrap_or_else(|e| e.into_inner()) = config.clone();
         // Save config to disk
         if let Some(ref dir) = self.data_dir {
             if let Ok(json) = serde_json::to_string(&config) {
@@ -490,8 +490,8 @@ impl ClipboardManager {
         if let Some(ref dir) = self.data_dir {
             if let Ok(json) = fs::read_to_string(dir.join("config.json")) {
                 if let Ok(config) = serde_json::from_str::<AppConfig>(&json) {
-                    *self.max_items.lock().unwrap() = config.max_items;
-                    *self.config.lock().unwrap() = config;
+                    *self.max_items.lock().unwrap_or_else(|e| e.into_inner()) = config.max_items;
+                    *self.config.lock().unwrap_or_else(|e| e.into_inner()) = config;
                 }
             }
         }
@@ -499,7 +499,7 @@ impl ClipboardManager {
 
     /// Export all items as JSON string.
     pub fn export_history(&self) -> Result<String, String> {
-        let items = self.items.lock().unwrap();
+        let items = self.items.lock().unwrap_or_else(|e| e.into_inner());
         serde_json::to_string_pretty(&*items).map_err(|e| format!("Export error: {}", e))
     }
 
@@ -507,7 +507,7 @@ impl ClipboardManager {
     pub fn import_history(&self, json: &str) -> Result<usize, String> {
         let imported: Vec<ClipboardItem> = serde_json::from_str(json).map_err(|e| format!("Import parse error: {}", e))?;
         let count = imported.len();
-        let mut items = self.items.lock().unwrap();
+        let mut items = self.items.lock().unwrap_or_else(|e| e.into_inner());
         for item in imported {
             if !items.iter().any(|i| i.id == item.id) {
                 items.push(item);
@@ -520,7 +520,7 @@ impl ClipboardManager {
     }
 
     pub fn toggle_favorite(&self, id: &str) {
-        let mut items = self.items.lock().unwrap();
+        let mut items = self.items.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(item) = items.iter_mut().find(|item| item.id == id) {
             item.favorite = !item.favorite;
         }
@@ -533,7 +533,7 @@ impl ClipboardManager {
         if tag.is_empty() {
             return;
         }
-        let mut items = self.items.lock().unwrap();
+        let mut items = self.items.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(item) = items.iter_mut().find(|item| item.id == id) {
             if !item.tags.contains(&tag) {
                 item.tags.push(tag);
@@ -544,7 +544,7 @@ impl ClipboardManager {
     }
 
     pub fn remove_tag(&self, id: &str, tag: &str) {
-        let mut items = self.items.lock().unwrap();
+        let mut items = self.items.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(item) = items.iter_mut().find(|item| item.id == id) {
             item.tags.retain(|t| t != tag);
         }
@@ -553,7 +553,7 @@ impl ClipboardManager {
     }
 
     pub fn get_all_tags(&self) -> Vec<String> {
-        let items = self.items.lock().unwrap();
+        let items = self.items.lock().unwrap_or_else(|e| e.into_inner());
         let mut tags: HashSet<String> = HashSet::new();
         for item in items.iter() {
             for tag in &item.tags {
@@ -569,7 +569,7 @@ impl ClipboardManager {
         let mut items: Vec<ClipboardItem> = self
             .items
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .filter(|item| item.favorite)
             .cloned()
@@ -579,10 +579,10 @@ impl ClipboardManager {
     }
 
     pub fn clear(&self) {
-        self.items.lock().unwrap().clear();
-        self.images.lock().unwrap().clear();
-        self.last_image_hash.lock().unwrap().clear();
-        self.last_files.lock().unwrap().clear();
+        self.items.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.images.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.last_image_hash.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.last_files.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.save_to_disk();
     }
 
@@ -601,7 +601,7 @@ impl ClipboardManager {
 
         thread::spawn(move || loop {
             let interval = {
-                let cfg = manager.config.lock().unwrap();
+                let cfg = manager.config.lock().unwrap_or_else(|e| e.into_inner());
                 cfg.poll_interval_ms
             };
             thread::sleep(Duration::from_millis(interval));
@@ -625,7 +625,7 @@ impl ClipboardManager {
             let trimmed = text.trim();
             if !trimmed.is_empty() {
                 let is_new = {
-                    let mut last = manager.last_text.lock().unwrap();
+                    let mut last = manager.last_text.lock().unwrap_or_else(|e| e.into_inner());
                     if *last == text {
                         false
                     } else {
@@ -655,7 +655,7 @@ impl ClipboardManager {
                 let hash = format!("{:x}", hasher.finalize());
 
                 let is_new = {
-                    let mut last = manager.last_image_hash.lock().unwrap();
+                         let mut last = manager.last_image_hash.lock().unwrap_or_else(|e| e.into_inner());
                     if *last == hash {
                         false
                     } else {
@@ -671,7 +671,7 @@ impl ClipboardManager {
 
                         // Store image data before inserting
                         {
-                            let mut images = manager.images.lock().unwrap();
+                            let mut images = manager.images.lock().unwrap_or_else(|e| e.into_inner());
                             images.insert(item.id.clone(), png);
                         }
 
@@ -684,7 +684,7 @@ impl ClipboardManager {
             // --- Check files (CF_HDROP) ---
             if let Some(files) = get_clipboard_files() {
                 let is_new = {
-                    let mut last = manager.last_files.lock().unwrap();
+                    let mut last = manager.last_files.lock().unwrap_or_else(|e| e.into_inner());
                     if *last == files {
                         false
                     } else {

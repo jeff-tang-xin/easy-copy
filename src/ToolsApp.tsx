@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
+import type { Dispatch, SetStateAction } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
@@ -623,6 +624,188 @@ interface IpInfo {
   [k: string]: any;
 }
 
+interface ProxyRoute {
+  id: string;
+  path_prefix: string;
+  target: string;
+  enabled: boolean;
+}
+
+interface ProxyConfig {
+  default_target: string;
+  port: number;
+  running: boolean;
+  routes: ProxyRoute[];
+}
+
+interface ProxyState {
+  port: number;
+  isRunning: boolean;
+  defaultTarget: string;
+  routes: ProxyRoute[];
+  logs: string[];
+}
+
+function ProxyTab({
+  state,
+  setState,
+}: {
+  state: ProxyState;
+  setState: Dispatch<SetStateAction<ProxyState>>;
+}) {
+  const { port, isRunning, defaultTarget, routes, logs } = state;
+  const [newPrefix, setNewPrefix] = useState("");
+  const [newTarget, setNewTarget] = useState("");
+
+  const pushLog = (msg: string) =>
+    setState((s) => ({
+      ...s,
+      logs: [`[${new Date().toLocaleTimeString()}] ${msg}`, ...s.logs],
+    }));
+
+  // Sync from backend whenever this tab mounts, so the UI reflects the real
+  // proxy state even after switching panels (which unmounts the component).
+  useEffect(() => {
+    (async () => {
+      try {
+        const cfg = await invoke<ProxyConfig>("get_proxy_status");
+        setState((s) => ({
+          ...s,
+          port: cfg.port,
+          isRunning: cfg.running,
+          defaultTarget: cfg.default_target,
+          routes: cfg.routes,
+        }));
+      } catch {
+        // silent
+      }
+    })();
+  }, []);
+
+  const toggleServer = async () => {
+    try {
+      await invoke(isRunning ? "stop_proxy" : "start_proxy", { port });
+      setState((s) => ({ ...s, isRunning: !isRunning }));
+      pushLog(`Proxy ${isRunning ? "stopped" : "started"} on port ${port}`);
+    } catch (e) {
+      pushLog(`Error: ${String(e)}`);
+    }
+  };
+
+  const saveDefaultTarget = async (target: string) => {
+    try {
+      await invoke("set_proxy_default_target", { target });
+    } catch (e) {
+      pushLog(`Error saving default target: ${String(e)}`);
+    }
+  };
+
+  const addRoute = async () => {
+    const prefix = newPrefix.trim();
+    const target = newTarget.trim();
+    if (!prefix || !target) return;
+    const route: ProxyRoute = {
+      id: `route_${Date.now()}`,
+      path_prefix: prefix,
+      target,
+      enabled: true,
+    };
+    try {
+      await invoke("upsert_proxy_route", { route });
+      setState((s) => ({ ...s, routes: [...s.routes, route] }));
+      setNewPrefix("");
+      setNewTarget("");
+      pushLog(`Rule added: ${prefix} → ${target}`);
+    } catch (e) {
+      pushLog(`Error adding rule: ${String(e)}`);
+    }
+  };
+
+  const removeRoute = async (id: string) => {
+    try {
+      await invoke("delete_proxy_route", { routeId: id });
+      setState((s) => ({ ...s, routes: s.routes.filter((r) => r.id !== id) }));
+    } catch (e) {
+      pushLog(`Error removing rule: ${String(e)}`);
+    }
+  };
+
+  const toggleRoute = async (id: string) => {
+    try {
+      await invoke("toggle_proxy_route", { routeId: id });
+      setState((s) => ({
+        ...s,
+        routes: s.routes.map((r) => (r.id === id ? { ...r, enabled: !r.enabled } : r)),
+      }));
+    } catch (e) {
+      pushLog(`Error toggling rule: ${String(e)}`);
+    }
+  };
+
+  return (
+    <div className="tools-tab-content">
+      <div className="tools-section">
+        <h3>Proxy Server</h3>
+        <div className="ip-query-row">
+          <input
+            className="tools-input"
+            type="number"
+            placeholder="Port"
+            value={port}
+            disabled={isRunning}
+            onChange={(e) => setState((s) => ({ ...s, port: Number(e.target.value) }))}
+          />
+          <button className={isRunning ? "stop-btn" : "start-btn"} onClick={toggleServer}>{isRunning ? "Stop Proxy" : "Start Proxy"}</button>
+        </div>
+        <p style={{ marginTop: "8px", fontSize: "13px", opacity: 0.8 }}>Status: {isRunning ? "Running" : "Stopped"}</p>
+      </div>
+      <div className="tools-section">
+        <h3>Default Target</h3>
+        <p style={{ fontSize: "13px", opacity: 0.7, marginBottom: "6px" }}>
+          Requests matching no rule below are forwarded here.
+        </p>
+        <input
+          className="tools-input"
+          placeholder="http://localhost:8080"
+          value={defaultTarget}
+          onChange={(e) => setState((s) => ({ ...s, defaultTarget: e.target.value }))}
+          onBlur={(e) => saveDefaultTarget(e.target.value.trim())}
+        />
+      </div>
+      <div className="tools-section">
+        <h3>Forwarding Rules</h3>
+        <p style={{ fontSize: "13px", opacity: 0.7, marginBottom: "6px" }}>
+          If a request path starts with the prefix it is forwarded to the target (nginx-style prefix match).
+        </p>
+        <div className="ip-query-row">
+          <input className="tools-input" placeholder="Path prefix, e.g. /api" value={newPrefix} onChange={(e) => setNewPrefix(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addRoute(); }} />
+          <input className="tools-input" placeholder="Target, e.g. http://localhost:3000" value={newTarget} onChange={(e) => setNewTarget(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addRoute(); }} />
+          <button onClick={addRoute}>Add Rule</button>
+        </div>
+        <div style={{ marginTop: "12px" }}>
+          {routes.map((route) => (
+            <div key={route.id} className="tools-output-row" style={{ marginBottom: "4px", opacity: route.enabled ? 1 : 0.5 }}>
+              <code className="tools-code">{route.path_prefix} → {route.target}</code>
+              <button className="copy-btn" onClick={() => toggleRoute(route.id)}>{route.enabled ? "Disable" : "Enable"}</button>
+              <button className="copy-btn" onClick={() => removeRoute(route.id)}>Remove</button>
+            </div>
+          ))}
+          {routes.length === 0 && <p style={{ fontSize: "13px", opacity: 0.6 }}>No rules configured</p>}
+        </div>
+      </div>
+      <div className="tools-section">
+        <h3>Activity Log</h3>
+        <div style={{ maxHeight: "200px", overflowY: "auto", fontFamily: "monospace", fontSize: "12px" }}>
+          {logs.map((log, i) => (
+            <div key={i} style={{ padding: "2px 0" }}>{log}</div>
+          ))}
+          {logs.length === 0 && <p style={{ fontSize: "13px", opacity: 0.6 }}>No activity yet</p>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function IpTab() {
   const [myIp, setMyIp] = useState("");
   const [queryInput, setQueryInput] = useState("");
@@ -741,18 +924,26 @@ function IpTab() {
  * Main
  * ============================================================= */
 
-type Tab = "timestamp" | "cron" | "regex" | "ip";
+type Tab = "timestamp" | "cron" | "regex" | "ip" | "proxy";
 
 const TABS: { id: Tab; label: string; icon: string }[] = [
   { id: "timestamp", label: "Timestamp", icon: "🕐" },
   { id: "cron",      label: "Cron",      icon: "⚙️" },
   { id: "regex",     label: "Regex",     icon: "🔍" },
   { id: "ip",        label: "IP Lookup", icon: "🌐" },
+  { id: "proxy",     label: "Proxy",     icon: "🔀" },
 ];
 
 export default function ToolsApp() {
   useTheme();
   const [tab, setTab] = useState<Tab>("timestamp");
+  const [proxyState, setProxyState] = useState<ProxyState>({
+    port: 10880,
+    isRunning: false,
+    defaultTarget: "http://localhost:8080",
+    routes: [],
+    logs: [],
+  });
 
   // Intercept window close: hide instead of destroy so it can be reopened
   useEffect(() => {
@@ -765,6 +956,27 @@ export default function ToolsApp() {
       unlisten.then((fn) => fn());
     };
   }, []);
+
+  // Sync proxy state from backend whenever the proxy tab is shown
+  // (after switching away and back, the component gets remounted, so we
+  // refresh from the real backend state).
+  useEffect(() => {
+    if (tab !== "proxy") return;
+    (async () => {
+      try {
+        const cfg = await invoke<ProxyConfig>("get_proxy_status");
+        setProxyState((s) => ({
+          ...s,
+          port: cfg.port,
+          isRunning: cfg.running,
+          defaultTarget: cfg.default_target,
+          routes: cfg.routes,
+        }));
+      } catch {
+        // silent
+      }
+    })();
+  }, [tab]);
 
   return (
     <div className="tools-app">
@@ -785,6 +997,7 @@ export default function ToolsApp() {
         {tab === "cron" && <CronTab />}
         {tab === "regex" && <RegexTab />}
         {tab === "ip" && <IpTab />}
+        {tab === "proxy" && <ProxyTab state={proxyState} setState={setProxyState} />}
       </div>
     </div>
   );
