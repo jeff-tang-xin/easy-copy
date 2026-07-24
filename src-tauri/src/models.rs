@@ -215,4 +215,19 @@ pub struct ProxyLog {
     pub route_match: Option<String>,
     pub status: u16,
     pub duration_ms: u64,
+    /// Request headers as (name, value) pairs.
+    #[serde(default)]
+    pub request_headers: Vec<(String, String)>,
+    /// Request body as UTF-8 text (truncated for large/binary payloads).
+    #[serde(default)]
+    pub request_body: Option<String>,
+    /// Response headers as (name, value) pairs.
+    #[serde(default)]
+    pub response_headers: Vec<(String, String)>,
+    /// Response body as UTF-8 text (truncated for large/binary payloads).
+    #[serde(default)]
+    pub response_body: Option<String>,
+    /// Error detail when the forward failed (connection refused, timeout, ...).
+    #[serde(default)]
+    pub error: Option<String>,
 }

@@ -429,6 +429,64 @@ struct ProxyState {
     port: std::sync::atomic::AtomicU16,
     logs: std::sync::Mutex<Vec<crate::models::ProxyLog>>,
     shutdown_tx: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// Path to the config directory for persistence (JSON file).
+    config_path: std::sync::Mutex<Option<std::path::PathBuf>>,
+}
+
+impl ProxyState {
+    /// Path to the proxy config JSON file.
+    fn config_file(&self) -> Option<std::path::PathBuf> {
+        self.config_path
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .map(|d| d.join("proxy_config.json"))
+    }
+
+    /// Load proxy config from disk (routes + default_target).
+    /// Starts silently with defaults on any error (missing file, corrupt JSON, ...).
+    fn load_config(&self) {
+        let path = match self.config_file() {
+            Some(p) => p,
+            None => return,
+        };
+        let json = match std::fs::read_to_string(&path) {
+            Ok(j) => j,
+            Err(_) => return,
+        };
+        #[derive(serde::Deserialize)]
+        struct PersistedProxyConfig {
+            default_target: String,
+            routes: Vec<crate::models::ProxyRoute>,
+        }
+        if let Ok(cfg) = serde_json::from_str::<PersistedProxyConfig>(&json) {
+            *self.default_target.lock().unwrap_or_else(|e| e.into_inner()) = cfg.default_target;
+            *self.routes.lock().unwrap_or_else(|e| e.into_inner()) = cfg.routes;
+        }
+    }
+
+    /// Save proxy config to disk (routes + default_target).
+    fn save_config(&self) {
+        let path = match self.config_file() {
+            Some(p) => p,
+            None => return,
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        #[derive(serde::Serialize)]
+        struct PersistedProxyConfig<'a> {
+            default_target: &'a str,
+            routes: &'a [crate::models::ProxyRoute],
+        }
+        let cfg = PersistedProxyConfig {
+            default_target: &self.default_target.lock().unwrap_or_else(|e| e.into_inner()),
+            routes: &self.routes.lock().unwrap_or_else(|e| e.into_inner()),
+        };
+        if let Ok(json) = serde_json::to_string_pretty(&cfg) {
+            let _ = std::fs::write(path, json);
+        }
+    }
 }
 
 impl Default for ProxyState {
@@ -436,23 +494,11 @@ impl Default for ProxyState {
         Self {
             running: std::sync::atomic::AtomicBool::new(false),
             default_target: std::sync::Mutex::new("http://localhost:8080".to_string()),
-            routes: std::sync::Mutex::new(vec![
-                crate::models::ProxyRoute {
-                    id: "default_api".to_string(),
-                    path_prefix: "/api".to_string(),
-                    target: "http://localhost:3000".to_string(),
-                    enabled: true,
-                },
-                crate::models::ProxyRoute {
-                    id: "static_files".to_string(),
-                    path_prefix: "/static".to_string(),
-                    target: "http://localhost:4000".to_string(),
-                    enabled: true,
-                },
-            ]),
+            routes: std::sync::Mutex::new(Vec::new()),
             port: std::sync::atomic::AtomicU16::new(10880),
             logs: std::sync::Mutex::new(Vec::new()),
             shutdown_tx: std::sync::Mutex::new(None),
+            config_path: std::sync::Mutex::new(None),
         }
     }
 }
@@ -539,6 +585,42 @@ fn start_proxy(
                 Client::builder(TokioExecutor::new()).build(https_connector);
 
             let handler_state = state_clone.clone();
+
+            // Helper function to push a log entry with all collected details.
+            fn push_log_with_details(
+                status: u16,
+                res_headers: Vec<(String, String)>,
+                res_body: Option<String>,
+                error: Option<String>,
+                method: &str,
+                url: &str,
+                route_match: &Option<String>,
+                start: &Instant,
+                state: &std::sync::Arc<ProxyState>,
+                req_headers: &Vec<(String, String)>,
+                req_body: &Option<String>,
+            ) {
+                let mut logs = state.logs.lock().unwrap();
+                logs.push(crate::models::ProxyLog {
+                    id: Uuid::new_v4().to_string(),
+                    timestamp: chrono::Utc::now().timestamp_millis(),
+                    method: method.to_string(),
+                    url: url.to_string(),
+                    route_match: route_match.clone(),
+                    status,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    request_headers: req_headers.clone(),
+                    request_body: req_body.clone(),
+                    response_headers: res_headers,
+                    response_body: res_body,
+                    error,
+                });
+                if logs.len() > 100 {
+                    let excess = logs.len() - 100;
+                    logs.drain(0..excess);
+                }
+            }
+
             let app = Router::new().fallback(move |req: Request| {
                 let client = client.clone();
                 let state = handler_state.clone();
@@ -547,6 +629,39 @@ fn start_proxy(
                     let uri = req.uri().to_string();
                     let path = req.uri().path().to_string();
                     let start = Instant::now();
+
+                    // Collect request headers for logging.
+                    let req_headers: Vec<(String, String)> = req
+                        .headers()
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_string()))
+                        .collect();
+
+                    // Collect request body (up to 64 KB) for logging, then reconstruct.
+                    use http_body_util::BodyExt;
+                    let (req_parts, req_body) = req.into_parts();
+                    let req_body_bytes = BodyExt::collect(req_body)
+                        .await
+                        .map(|c| c.to_bytes())
+                        .unwrap_or_default();
+                    let req_body_str = if !req_body_bytes.is_empty() {
+                        if req_body_bytes.len() <= 65536 {
+                            String::from_utf8(req_body_bytes.to_vec()).ok()
+                        } else {
+                            String::from_utf8(req_body_bytes[..65536].to_vec())
+                                .ok()
+                                .map(|s| {
+                                    format!(
+                                        "{}... (truncated, {} bytes total)",
+                                        s,
+                                        req_body_bytes.len()
+                                    )
+                                })
+                        }
+                    } else {
+                        None
+                    };
+                    let req = Request::from_parts(req_parts, Body::from(req_body_bytes));
 
                     // Route matching: first match specific prefixes, then use default
                     let (target, matched_route) = {
@@ -562,16 +677,7 @@ fn start_proxy(
 
                     // No matching route and no default target configured.
                     if target.trim().is_empty() {
-                        let mut logs = state.logs.lock().unwrap();
-                        logs.push(crate::models::ProxyLog {
-                            id: Uuid::new_v4().to_string(),
-                            timestamp: chrono::Utc::now().timestamp_millis(),
-                            method: method.clone(),
-                            url: uri.clone(),
-                            route_match: None,
-                            status: 502,
-                            duration_ms: start.elapsed().as_millis() as u64,
-                        });
+                        push_log_with_details(502, vec![], None, None, &method, &uri, &matched_route, &start, &state, &req_headers, &req_body_str);
                         return Response::builder()
                             .status(StatusCode::BAD_GATEWAY)
                             .body(Body::from(
@@ -618,30 +724,56 @@ fn start_proxy(
                         }
                     };
 
-                    let push_log = |status: u16| {
-                        let mut logs = state.logs.lock().unwrap();
-                        logs.push(crate::models::ProxyLog {
-                            id: Uuid::new_v4().to_string(),
-                            timestamp: chrono::Utc::now().timestamp_millis(),
-                            method: method.clone(),
-                            url: target_url.clone(),
-                            route_match: matched_route.clone(),
-                            status,
-                            duration_ms: start.elapsed().as_millis() as u64,
-                        });
-                        if logs.len() > 100 {
-                            let excess = logs.len() - 100;
-                            logs.drain(0..excess);
-                        }
-                    };
-
                     match client.request(forwarded_req).await {
                         Ok(res) => {
-                            push_log(res.status().as_u16());
+                            let status = res.status().as_u16();
+                            let res_headers: Vec<(String, String)> = res
+                                .headers()
+                                .iter()
+                                .map(|(k, v)| {
+                                    (k.to_string(), v.to_str().unwrap_or("<binary>").to_string())
+                                })
+                                .collect();
+
+                            // Collect response body (up to 256 KB) for logging.
+                            let (res_parts, res_body) = res.into_parts();
+                            let res_body_bytes = BodyExt::collect(res_body)
+                                .await
+                                .map(|c| c.to_bytes())
+                                .unwrap_or_default();
+                            let res_body_str = if !res_body_bytes.is_empty() {
+                                if res_body_bytes.len() <= 262144 {
+                                    String::from_utf8(res_body_bytes.to_vec()).ok()
+                                } else {
+                                    String::from_utf8(res_body_bytes[..262144].to_vec())
+                                        .ok()
+                                        .map(|s| {
+                                            format!(
+                                                "{}... (truncated, {} bytes total)",
+                                                s,
+                                                res_body_bytes.len()
+                                            )
+                                        })
+                                }
+                            } else {
+                                None
+                            };
+
+                            push_log_with_details(
+                                status, res_headers, res_body_str, None,
+                                &method, &target_url, &matched_route, &start, &state,
+                                &req_headers, &req_body_str,
+                            );
+
+                            let res = Response::from_parts(res_parts, Body::from(res_body_bytes));
                             res.map(Body::new)
                         }
                         Err(e) => {
-                            push_log(503);
+                            push_log_with_details(
+                                503, vec![], None, Some(e.to_string()),
+                                &method, &target_url, &matched_route, &start, &state,
+                                &req_headers, &req_body_str,
+                            );
                             Response::builder()
                                 .status(StatusCode::BAD_GATEWAY)
                                 .body(Body::from(format!("Proxy error: {}", e)))
@@ -715,6 +847,7 @@ fn set_proxy_default_target(
     target: String,
 ) -> Result<(), String> {
     *state.default_target.lock().unwrap() = target;
+    state.save_config();
     Ok(())
 }
 
@@ -725,6 +858,20 @@ fn upsert_proxy_route(
     route: crate::models::ProxyRoute,
 ) -> Result<(), String> {
     let mut routes = state.routes.lock().unwrap();
+    // Uniqueness check: no other route may share the same path_prefix.
+    let prefix = route.path_prefix.trim();
+    if prefix.is_empty() {
+        return Err("Path prefix cannot be empty".to_string());
+    }
+    if let Some(conflict) = routes
+        .iter()
+        .find(|r| r.id != route.id && r.path_prefix.trim() == prefix)
+    {
+        return Err(format!(
+            "Path prefix '{}' already used by another rule (→ {})",
+            prefix, conflict.target
+        ));
+    }
     if let Some(existing) = routes.iter_mut().find(|r| r.id == route.id) {
         existing.path_prefix = route.path_prefix;
         existing.target = route.target;
@@ -732,6 +879,8 @@ fn upsert_proxy_route(
     } else {
         routes.push(route);
     }
+    drop(routes);
+    state.save_config();
     Ok(())
 }
 
@@ -743,6 +892,8 @@ fn delete_proxy_route(
 ) -> Result<(), String> {
     let mut routes = state.routes.lock().unwrap();
     routes.retain(|r| r.id != route_id);
+    drop(routes);
+    state.save_config();
     Ok(())
 }
 
@@ -756,6 +907,8 @@ fn toggle_proxy_route(
     if let Some(route) = routes.iter_mut().find(|r| r.id == route_id) {
         route.enabled = !route.enabled;
     }
+    drop(routes);
+    state.save_config();
     Ok(())
 }
 
@@ -1046,8 +1199,11 @@ pub fn run() {
             note_manager.load();
             app.manage(note_manager);
 
-            // --- HTTP Proxy state ---
-            app.manage(std::sync::Arc::new(ProxyState::default()));
+            // --- HTTP Proxy state with persistence ---
+            let proxy_state = std::sync::Arc::new(ProxyState::default());
+            *proxy_state.config_path.lock().unwrap_or_else(|e| e.into_inner()) = data_dir.clone();
+            proxy_state.load_config();
+            app.manage(proxy_state);
 
             // --- Global Shortcuts: register based on user config ---
             let cfg = manager.get_config();

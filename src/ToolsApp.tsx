@@ -631,6 +631,21 @@ interface ProxyRoute {
   enabled: boolean;
 }
 
+interface ProxyLog {
+  id: string;
+  timestamp: number;
+  method: string;
+  url: string;
+  route_match: string | null;
+  status: number;
+  duration_ms: number;
+  request_headers: [string, string][];
+  request_body: string | null;
+  response_headers: [string, string][];
+  response_body: string | null;
+  error: string | null;
+}
+
 interface ProxyConfig {
   default_target: string;
   port: number;
@@ -644,6 +659,7 @@ interface ProxyState {
   defaultTarget: string;
   routes: ProxyRoute[];
   logs: string[];
+  requestLogs: ProxyLog[];
 }
 
 function ProxyTab({
@@ -653,9 +669,10 @@ function ProxyTab({
   state: ProxyState;
   setState: Dispatch<SetStateAction<ProxyState>>;
 }) {
-  const { port, isRunning, defaultTarget, routes, logs } = state;
+  const { port, isRunning, defaultTarget, routes, logs, requestLogs } = state;
   const [newPrefix, setNewPrefix] = useState("");
   const [newTarget, setNewTarget] = useState("");
+  const [selectedLog, setSelectedLog] = useState<ProxyLog | null>(null);
 
   const pushLog = (msg: string) =>
     setState((s) => ({
@@ -680,6 +697,19 @@ function ProxyTab({
         // silent
       }
     })();
+  }, []);
+
+  // Poll proxy logs every 2 seconds so new entries appear automatically.
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      try {
+        const logs = await invoke<ProxyLog[]>("get_proxy_logs");
+        setState((s) => ({ ...s, requestLogs: logs }));
+      } catch {
+        // silent
+      }
+    }, 2000);
+    return () => clearInterval(interval);
   }, []);
 
   const toggleServer = async () => {
@@ -794,13 +824,137 @@ function ProxyTab({
         </div>
       </div>
       <div className="tools-section">
+        <h3>Request Logs</h3>
+        <p style={{ fontSize: "13px", opacity: 0.7, marginBottom: "6px" }}>
+          Click a request to inspect full request/response details.
+        </p>
+        <div style={{ maxHeight: "260px", overflowY: "auto", fontFamily: "monospace", fontSize: "12px" }}>
+          {[...requestLogs].reverse().map((log) => {
+            const statusColor =
+              log.status >= 500 ? "#e5484d" : log.status >= 400 ? "#f5a623" : "#30a46c";
+            return (
+              <div
+                key={log.id}
+                onClick={() => setSelectedLog(log)}
+                style={{
+                  padding: "4px 6px",
+                  marginBottom: "2px",
+                  cursor: "pointer",
+                  borderRadius: "4px",
+                  display: "flex",
+                  gap: "8px",
+                  alignItems: "center",
+                  background: "rgba(255,255,255,0.03)",
+                }}
+              >
+                <span style={{ color: statusColor, fontWeight: 600, minWidth: "34px" }}>{log.status}</span>
+                <span style={{ minWidth: "46px", opacity: 0.8 }}>{log.method}</span>
+                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{log.url}</span>
+                <span style={{ opacity: 0.6 }}>{log.duration_ms}ms</span>
+              </div>
+            );
+          })}
+          {requestLogs.length === 0 && <p style={{ fontSize: "13px", opacity: 0.6 }}>No requests yet</p>}
+        </div>
+        {requestLogs.length > 0 && (
+          <button
+            className="copy-btn"
+            style={{ marginTop: "8px" }}
+            onClick={async () => {
+              try {
+                await invoke("clear_proxy_logs");
+                setState((s) => ({ ...s, requestLogs: [] }));
+              } catch (e) {
+                pushLog(`Error clearing logs: ${String(e)}`);
+              }
+            }}
+          >
+            Clear Logs
+          </button>
+        )}
+      </div>
+      <div className="tools-section">
         <h3>Activity Log</h3>
-        <div style={{ maxHeight: "200px", overflowY: "auto", fontFamily: "monospace", fontSize: "12px" }}>
+        <div style={{ maxHeight: "120px", overflowY: "auto", fontFamily: "monospace", fontSize: "12px" }}>
           {logs.map((log, i) => (
             <div key={i} style={{ padding: "2px 0" }}>{log}</div>
           ))}
           {logs.length === 0 && <p style={{ fontSize: "13px", opacity: 0.6 }}>No activity yet</p>}
         </div>
+      </div>
+
+      {selectedLog && (
+        <ProxyLogDetail log={selectedLog} onClose={() => setSelectedLog(null)} />
+      )}
+    </div>
+  );
+}
+
+/* Modal showing the full request/response JSON for a single proxy log entry. */
+function ProxyLogDetail({ log, onClose }: { log: ProxyLog; onClose: () => void }) {
+  const detail = {
+    request: {
+      method: log.method,
+      url: log.url,
+      route_match: log.route_match,
+      headers: Object.fromEntries(log.request_headers),
+      body: log.request_body,
+    },
+    response: {
+      status: log.status,
+      duration_ms: log.duration_ms,
+      timestamp: new Date(log.timestamp).toISOString(),
+      headers: Object.fromEntries(log.response_headers),
+      body: log.response_body,
+      error: log.error,
+    },
+  };
+  const json = JSON.stringify(detail, null, 2);
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.55)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 1000,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: "#1c1c1e",
+          border: "1px solid rgba(255,255,255,0.15)",
+          borderRadius: "8px",
+          padding: "16px",
+          width: "min(720px, 90vw)",
+          maxHeight: "80vh",
+          overflowY: "auto",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
+          <h3 style={{ margin: 0 }}>
+            {log.method} {log.status} · {log.duration_ms}ms
+          </h3>
+          <div style={{ display: "flex", gap: "8px" }}>
+            <button className="copy-btn" onClick={() => navigator.clipboard.writeText(json)}>Copy JSON</button>
+            <button className="copy-btn" onClick={onClose}>Close</button>
+          </div>
+        </div>
+        <pre
+          style={{
+            fontFamily: "monospace",
+            fontSize: "12px",
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-all",
+            margin: 0,
+          }}
+        >
+          {json}
+        </pre>
       </div>
     </div>
   );
@@ -943,6 +1097,7 @@ export default function ToolsApp() {
     defaultTarget: "http://localhost:8080",
     routes: [],
     logs: [],
+    requestLogs: [],
   });
 
   // Intercept window close: hide instead of destroy so it can be reopened

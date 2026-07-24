@@ -50,32 +50,6 @@ SyntaxHighlighter.registerLanguage("css", css);
 import { format as formatSql } from "sql-formatter";
 import "./App.css";
 
-/* ===== Proxy Router types ===== */
-
-interface ProxyRoute {
-  id: string;
-  path_prefix: string;
-  target: string;
-  enabled: boolean;
-}
-
-interface ProxyLog {
-  id: string;
-  timestamp: number;
-  method: string;
-  url: string;
-  route_match: string | null;
-  status: number;
-  duration_ms: number;
-}
-
-interface ProxyConfig {
-  default_target: string;
-  port: number;
-  running: boolean;
-  routes: ProxyRoute[];
-}
-
 // Module-level constant so React doesn't see a new object each render.
 const CODE_CUSTOM_STYLE = { margin: 0, background: "transparent", fontSize: 13 } as const;
 // Bail out of syntax highlighting for very large payloads — Prism tokenising
