@@ -599,9 +599,13 @@ function App() {
   };
 
   const handleCopy = useCallback(async (id: string) => {
-    await invoke("copy_to_clipboard", { id });
-    setCopiedId(id);
-    setTimeout(() => setCopiedId(null), 1500);
+    try {
+      await invoke("copy_to_clipboard", { id });
+      setCopiedId(id);
+      setTimeout(() => setCopiedId(null), 1500);
+    } catch (err) {
+      showToast(`Copy failed: ${err}`, "error");
+    }
   }, []);
 
   const handleDelete = async (id: string, e: React.MouseEvent) => {
@@ -920,7 +924,7 @@ function App() {
               <div
                 key={item.id}
                 className={`item-card ${(item.type || 'text').toLowerCase()} ${index === selectedIndex ? "selected" : ""}`}
-                onClick={() => setSelectedIndex(index)}
+                onClick={() => { setSelectedIndex(index); handleCopy(item.id); }}
                 onContextMenu={(e) => handleContextMenu(e, item.id)}
                 onDoubleClick={(e) => {
                   e.stopPropagation();

@@ -316,7 +316,7 @@ impl ClipboardManager {
 
     pub fn copy_to_clipboard(&self, id: &str) -> Result<String, String> {
         // Serialize with the poll loop to avoid Windows clipboard contention (1418).
-        let _guard = CLIPBOARD_LOCK.lock().unwrap();
+        let _guard = CLIPBOARD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let item = {
             let items = self.items.lock().unwrap_or_else(|e| e.into_inner());
             items
@@ -581,6 +581,7 @@ impl ClipboardManager {
     pub fn clear(&self) {
         self.items.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.images.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.last_text.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.last_image_hash.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.last_files.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.save_to_disk();
@@ -613,12 +614,12 @@ impl ClipboardManager {
 
             // Hold the clipboard lock for the whole read cycle so a concurrent
             // copy (set_text/set_image/set_files) can't collide → avoids 1418.
-            let _guard = CLIPBOARD_LOCK.lock().unwrap();
+            let _guard = CLIPBOARD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
             // --- Check text ---
             let raw_text = match Clipboard::new() {
                 Ok(mut cb) => cb.get_text().unwrap_or_default(),
-                Err(_) => continue,
+                Err(_) => String::new(),
             };
             let text = strip_ansi_escapes(&raw_text);
 

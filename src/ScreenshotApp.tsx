@@ -2,6 +2,11 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { getCurrentWindow, LogicalSize, LogicalPosition } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import {
+  IconCrop, IconRect, IconArrow, IconPen, IconText, IconMosaic,
+  IconUndo, IconClear, IconPin, IconSticker, IconSave, IconCopy,
+  IconClose, IconCheck, IconTrash,
+} from "./ScreenshotIcons";
 import "./App.css";
 import "./ScreenshotApp.css";
 
@@ -51,7 +56,7 @@ function useTheme() {
 /* =============================================================
  * Types
  * ============================================================= */
-type Tool = "select" | "rect" | "arrow" | "pen" | "text" | "none";
+type Tool = "select" | "rect" | "arrow" | "pen" | "text" | "mosaic" | "none";
 
 /** Overlay phase: 'select' = waiting for the user to drag a region (toolbar
  * hidden), 'edit' = a region exists → annotation toolbar is shown. */
@@ -66,16 +71,21 @@ const STROKE_SIZES = [2, 4, 6] as const;
 type StrokeSize = typeof STROKE_SIZES[number];
 
 /** Annotation tools shown in the toolbar (icon-only, tooltip on hover). */
-const DRAW_TOOLS: { key: Tool; icon: string; label: string }[] = [
-  { key: "rect", icon: "▭", label: "矩形" },
-  { key: "arrow", icon: "↗", label: "箭头" },
-  { key: "pen", icon: "✎", label: "画笔" },
-  { key: "text", icon: "T", label: "文字" },
+const DRAW_TOOLS: { key: Tool; Icon: (p: { size?: number }) => React.ReactElement; label: string }[] = [
+  { key: "rect", Icon: IconRect, label: "矩形 (1)" },
+  { key: "arrow", Icon: IconArrow, label: "箭头 (2)" },
+  { key: "pen", Icon: IconPen, label: "画笔 (3)" },
+  { key: "text", Icon: IconText, label: "文字 (4) — 可自动换行，选择工具下双击可重新编辑" },
+  { key: "mosaic", Icon: IconMosaic, label: "马赛克 (5) — 拖拽涂抹敏感信息" },
 ];
 
 interface Point { x: number; y: number; }
 
-interface RectAnnotation {
+/** Monotonic insertion order so Undo pops the truly newest annotation
+ * regardless of type (previously it popped by type priority). */
+interface Ordered { seq: number; }
+
+interface RectAnnotation extends Ordered {
   id: string;
   x: number;
   y: number;
@@ -85,7 +95,7 @@ interface RectAnnotation {
   size: StrokeSize;
 }
 
-interface ArrowAnnotation {
+interface ArrowAnnotation extends Ordered {
   id: string;
   x1: number;
   y1: number;
@@ -95,24 +105,103 @@ interface ArrowAnnotation {
   size: StrokeSize;
 }
 
-interface PenAnnotation {
+interface PenAnnotation extends Ordered {
   id: string;
   points: Point[];
   color: Color;
   size: StrokeSize;
 }
 
-interface TextAnnotation {
+interface TextAnnotation extends Ordered {
   id: string;
   x: number;
   y: number;
   text: string;
   color: Color;
   size: StrokeSize;
+  /** Wrap boundary in image px. Text longer than this soft-wraps onto new lines
+   * so long annotations can never run past the capture region / screen edge. */
+  maxW: number;
+}
+
+/** Pixelated block region — hides sensitive content (Snipaste-style mosaic). */
+interface MosaicAnnotation extends Ordered {
+  id: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** Source-pixel block size; larger = coarser censoring. */
+  block: number;
 }
 
 /** Selected region (image-space coordinates). null = whole image. */
 interface Region { x: number; y: number; w: number; h: number; }
+
+/** The 8 resize grips rendered around a chosen region. */
+const HANDLES = ["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const;
+type HandleId = typeof HANDLES[number];
+
+/** An in-flight region adjustment: move the whole box, or drag one grip. */
+type RegionDrag =
+  | { kind: "move"; start: Point; orig: Region }
+  | { kind: "resize"; handle: HandleId; start: Point; orig: Region };
+
+/** Minimum region side length in image pixels. */
+const MIN_REGION = 8;
+
+/** Mosaic block size (source px) per stroke-size setting — reuses the existing
+ * 2/4/6 size selector so the toolbar needs no extra control. */
+const MOSAIC_BLOCK: Record<StrokeSize, number> = { 2: 8, 4: 14, 6: 22 };
+
+/** An active text editor session. `id` set = editing an existing annotation
+ * in place; absent = composing a brand-new one. */
+interface TextDraft {
+  x: number;
+  y: number;
+  maxW: number;
+  id?: string;
+}
+
+/** Split `text` into rendered lines: honours explicit \n, then greedy-wraps
+ * each paragraph to `maxW` using the supplied (already font-configured) ctx.
+ * Falls back to hard character-splitting for unbroken runs (e.g. long URLs or
+ * CJK without spaces) so a single word can still never overflow. */
+function wrapText(ctx: CanvasRenderingContext2D, text: string, maxW: number): string[] {
+  const out: string[] = [];
+  for (const para of text.split("\n")) {
+    if (!para) { out.push(""); continue; }
+    let line = "";
+    // Tokenise keeping spaces attached so Latin text breaks on spaces, while CJK
+    // (no spaces) degrades naturally to per-character wrapping below.
+    const tokens = para.match(/\S+\s*|\s+/g) ?? [para];
+    for (const tok of tokens) {
+      const cand = line + tok;
+      if (ctx.measureText(cand).width <= maxW || !line) {
+        // Token itself may still exceed maxW (long URL / CJK run) → char-split.
+        if (ctx.measureText(cand).width > maxW && !line) {
+          let chunk = "";
+          for (const ch of cand) {
+            if (ctx.measureText(chunk + ch).width > maxW && chunk) {
+              out.push(chunk);
+              chunk = ch;
+            } else {
+              chunk += ch;
+            }
+          }
+          line = chunk;
+          continue;
+        }
+        line = cand;
+      } else {
+        out.push(line.replace(/\s+$/, ""));
+        line = tok.replace(/^\s+/, "");
+      }
+    }
+    out.push(line.replace(/\s+$/, ""));
+  }
+  return out;
+}
 
 /* =============================================================
  * ScreenshotApp
@@ -138,6 +227,10 @@ export default function ScreenshotApp() {
   const [arrows, setArrows] = useState<ArrowAnnotation[]>([]);
   const [pens, setPens] = useState<PenAnnotation[]>([]);
   const [texts, setTexts] = useState<TextAnnotation[]>([]);
+  const [mosaics, setMosaics] = useState<MosaicAnnotation[]>([]);
+
+  // Id of the text annotation currently highlighted for edit/delete (select tool).
+  const [selectedTextId, setSelectedTextId] = useState<string | null>(null);
 
   // Selected capture region (image-space). null = full screenshot.
   const [region, setRegion] = useState<Region | null>(null);
@@ -147,15 +240,44 @@ export default function ScreenshotApp() {
   const [dragStart, setDragStart] = useState<Point>({ x: 0, y: 0 });
   const [dragCurrent, setDragCurrent] = useState<Point>({ x: 0, y: 0 });
 
-  const [textInput, setTextInput] = useState<Point | null>(null);
+  // In-flight region move/resize (null = not adjusting the region).
+  const [regionDrag, setRegionDrag] = useState<RegionDrag | null>(null);
+
+  const [textInput, setTextInput] = useState<TextDraft | null>(null);
   const [textValue, setTextValue] = useState("");
 
+  // Two stacked canvases so region drag never repaints the screenshot:
+  //   baseRef    — the captured image, blitted ONCE on load.
+  //   canvasRef  — annotations only, cleared + repainted per frame.
+  // Dimming and the selection border are GPU-composited DOM layers (see JSX),
+  // which is what removes the drag jank on high-resolution displays.
+  const baseRef = useRef<HTMLCanvasElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
+  // Bumped once the canvases have been given their real pixel size (image
+  // onload). Sizing a canvas clears it, and onload runs after React's initial
+  // paint effect, so every draw path must re-run afterwards. Text is the most
+  // visible victim: its coordinates are full-image, so on the default 300x150
+  // canvas it lands off-bitmap and never appears at all.
+  const [canvasReady, setCanvasReady] = useState(0);
+  // Monotonic counter stamped onto every annotation so Undo can pop by real
+  // insertion order across all four annotation lists.
+  const seqRef = useRef(0);
+  // Measured toolbar width, used to clamp its position near screen edges
+  // (previously a hardcoded estimate that broke when the toolbar changed).
+  const toolbarRef = useRef<HTMLDivElement>(null);
+  const [toolbarW, setToolbarW] = useState(560);
   // Live pen buffer + rAF handle so freehand drawing stays smooth: mousemove
   // pushes into a ref (no React re-render per point) and a rAF loop repaints.
   const penBufRef = useRef<Point[]>([]);
   const rafRef = useRef<number | null>(null);
+  // Live rect/arrow/mosaic drag endpoints kept in a ref as well, so dragging
+  // repaints at most once per frame instead of once per mousemove event.
+  const dragStartRef = useRef<Point>({ x: 0, y: 0 });
+  const dragCurRef = useRef<Point>({ x: 0, y: 0 });
+  // Latest region during a move/resize drag. Written on every mousemove but
+  // only flushed into React state once per frame (see scheduleRegionFlush).
+  const regionRef = useRef<Region | null>(null);
 
   // Convert a mouse event to image-space coordinates.
   const toImageCoords = useCallback((e: React.MouseEvent): Point => {
@@ -179,7 +301,10 @@ export default function ScreenshotApp() {
       setArrows([]);
       setPens([]);
       setTexts([]);
+      setMosaics([]);
+      setSelectedTextId(null);
       setRegion(null);
+      regionRef.current = null;
       setTool("select");
       setPhase("select");
       setTextInput(null);
@@ -189,26 +314,51 @@ export default function ScreenshotApp() {
     return () => { unlisten.then((fn) => fn()); };
   }, []);
 
-  // Load image onto canvas
+  // Load image: size BOTH canvases and blit the screenshot into the base layer
+  // exactly once. The annotation layer above it starts empty.
   useEffect(() => {
     if (!imagePath) return;
     const img = new Image();
     img.onload = () => {
       imgRef.current = img;
-      const canvas = canvasRef.current;
-      if (!canvas) return;
-      canvas.width = img.width;
-      canvas.height = img.height;
-      const ctx = canvas.getContext("2d");
-      if (ctx) ctx.drawImage(img, 0, 0);
+      const base = baseRef.current;
+      const over = canvasRef.current;
+      if (!base || !over) return;
+      // Assigning width/height RESETS the drawing context and wipes the
+      // bitmap, so only touch it when the size actually changed — and always
+      // repaint afterwards (below). This onload lands asynchronously, i.e. after
+      // React has already run the initial scheduleRedraw() effect: without the
+      // repaint the annotation layer stays blank until some unrelated state
+      // change happens to rebuild drawAnnotations.
+      if (base.width !== img.width || base.height !== img.height) {
+        base.width = img.width;
+        base.height = img.height;
+      }
+      if (over.width !== img.width || over.height !== img.height) {
+        over.width = img.width;
+        over.height = img.height;
+      }
+      const bctx = base.getContext("2d");
+      if (bctx) {
+        bctx.clearRect(0, 0, base.width, base.height);
+        bctx.drawImage(img, 0, 0);
+      }
+      // Now that the annotation canvas has its real pixel size, repaint it.
+      // Text lives at full-image coordinates, so on a default 300x150 canvas it
+      // would be drawn entirely outside the visible bitmap.
+      setCanvasReady((n) => n + 1);
     };
     // Payload is now a data URL (data:image/png;base64,...) and can be loaded directly.
     img.src = imagePath;
   }, [imagePath]);
 
+  // Scratch canvas reused for mosaic downsampling (avoids allocating per frame).
+  const scratchRef = useRef<HTMLCanvasElement | null>(null);
+
   // Pure annotation renderer — shared by the live canvas and the export path so
   // the saved/copied image always contains the exact same rect/arrow/pen/text.
-  const drawAnnotations = useCallback((ctx: CanvasRenderingContext2D) => {
+  // `src` is the clean screenshot, needed because mosaic samples real pixels.
+  const drawAnnotations = useCallback((ctx: CanvasRenderingContext2D, src: HTMLImageElement | null) => {
     const drawArrow = (a: { x1: number; y1: number; x2: number; y2: number; color: string; size: number }) => {
       const { x1, y1, x2, y2 } = a;
       const angle = Math.atan2(y2 - y1, x2 - x1);
@@ -236,6 +386,30 @@ export default function ScreenshotApp() {
       ctx.closePath();
       ctx.fill();
     };
+
+    // Mosaic FIRST so annotations always sit on top of censored areas.
+    // Technique: downscale the source area into a tiny scratch canvas, then blit
+    // it back up with smoothing OFF — gives blocky pixelation without the
+    // per-pixel getImageData cost that would stall the drag loop.
+    if (mosaics.length && src) {
+      if (!scratchRef.current) scratchRef.current = document.createElement("canvas");
+      const scratch = scratchRef.current;
+      const sctx = scratch.getContext("2d");
+      for (const m of mosaics) {
+        const cols = Math.max(1, Math.round(m.w / m.block));
+        const rows = Math.max(1, Math.round(m.h / m.block));
+        if (!sctx) break;
+        scratch.width = cols;
+        scratch.height = rows;
+        sctx.imageSmoothingEnabled = true;
+        sctx.clearRect(0, 0, cols, rows);
+        sctx.drawImage(src, m.x, m.y, m.w, m.h, 0, 0, cols, rows);
+        const prev = ctx.imageSmoothingEnabled;
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(scratch, 0, 0, cols, rows, m.x, m.y, m.w, m.h);
+        ctx.imageSmoothingEnabled = prev;
+      }
+    }
 
     // Rects
     for (const r of rects) {
@@ -276,50 +450,66 @@ export default function ScreenshotApp() {
       ctx.stroke();
     };
     for (const p of pens) drawPenPath(p.points, p.color, p.size);
-    // Texts
+    // Texts — soft-wrapped to their stored maxW so long strings stay inside the
+    // capture region instead of running off the edge of the image.
     for (const t of texts) {
       const fontPx = 12 + t.size * 4;
       ctx.font = `600 ${fontPx}px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`;
       ctx.textBaseline = "top";
       ctx.setLineDash([]);
       ctx.lineWidth = 3;
-      ctx.strokeStyle = "rgba(0,0,0,0.55)";
-      ctx.strokeText(t.text, t.x, t.y);
-      ctx.fillStyle = t.color;
-      ctx.fillText(t.text, t.x, t.y);
+      const lineH = Math.round(fontPx * 1.32);
+      const lines = wrapText(ctx, t.text, t.maxW);
+      lines.forEach((ln, i) => {
+        if (!ln) return;
+        const ly = t.y + i * lineH;
+        ctx.strokeStyle = "rgba(0,0,0,0.55)";
+        ctx.strokeText(ln, t.x, ly);
+        ctx.fillStyle = t.color;
+        ctx.fillText(ln, t.x, ly);
+      });
     }
-  }, [rects, arrows, pens, texts]);
+  }, [rects, arrows, pens, texts, mosaics]);
 
-  // Redraw canvas: base image, then dim non-selected area, then annotations.
-  // Optionally overlay a live preview (in-progress pen/arrow/rect) so drawing
-  // feels immediate without committing to state on every mouse move.
+  // Repaint the ANNOTATION layer only. The screenshot lives on a separate canvas
+  // underneath and the dim mask is a DOM layer, so this never touches full-frame
+  // pixels unless an annotation actually covers them — that is what keeps region
+  // dragging and freehand drawing smooth on 4K displays.
   const redraw = useCallback(() => {
     const canvas = canvasRef.current;
-    const img = imgRef.current;
-    if (!canvas || !img) return;
+    if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    ctx.drawImage(img, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // Dim everything outside the selected region so the crop is obvious.
-    if (region) {
-      ctx.save();
-      ctx.fillStyle = "rgba(0,0,0,0.5)";
-      // top / bottom / left / right bands around the region
-      ctx.fillRect(0, 0, canvas.width, region.y);
-      ctx.fillRect(0, region.y + region.h, canvas.width, canvas.height - region.y - region.h);
-      ctx.fillRect(0, region.y, region.x, region.h);
-      ctx.fillRect(region.x + region.w, region.y, canvas.width - region.x - region.w, region.h);
-      // region border
-      ctx.strokeStyle = "#3b82f6";
-      ctx.lineWidth = 2;
-      ctx.setLineDash([6, 4]);
-      ctx.strokeRect(region.x, region.y, region.w, region.h);
-      ctx.restore();
+    drawAnnotations(ctx, imgRef.current);
+
+    // Live mosaic preview: show the pixelation in place while dragging.
+    if (tool === "mosaic" && dragging) {
+      const a = dragStartRef.current;
+      const b = dragCurRef.current;
+      const mx = Math.min(a.x, b.x);
+      const my = Math.min(a.y, b.y);
+      const mw = Math.abs(b.x - a.x);
+      const mh = Math.abs(b.y - a.y);
+      const img = imgRef.current;
+      if (img && mw > 2 && mh > 2) {
+        const block = MOSAIC_BLOCK[size];
+        if (!scratchRef.current) scratchRef.current = document.createElement("canvas");
+        const scratch = scratchRef.current;
+        const sctx = scratch.getContext("2d");
+        const cols = Math.max(1, Math.round(mw / block));
+        const rows = Math.max(1, Math.round(mh / block));
+        if (sctx) {
+          scratch.width = cols;
+          scratch.height = rows;
+          sctx.drawImage(img, mx, my, mw, mh, 0, 0, cols, rows);
+          ctx.imageSmoothingEnabled = false;
+          ctx.drawImage(scratch, 0, 0, cols, rows, mx, my, mw, mh);
+          ctx.imageSmoothingEnabled = true;
+        }
+      }
     }
-
-    // Annotations drawn LAST so they sit on top of the dim overlay.
-    drawAnnotations(ctx);
 
     // Live pen preview straight from the ref buffer (no per-point setState).
     if (tool === "pen" && dragging && penBufRef.current.length) {
@@ -350,8 +540,8 @@ export default function ScreenshotApp() {
 
     // Live arrow preview while dragging so the user can aim before release.
     if (tool === "arrow" && dragging) {
-      const { x: x1, y: y1 } = dragStart;
-      const { x: x2, y: y2 } = dragCurrent;
+      const { x: x1, y: y1 } = dragStartRef.current;
+      const { x: x2, y: y2 } = dragCurRef.current;
       if (Math.hypot(x2 - x1, y2 - y1) > 2) {
         const angle = Math.atan2(y2 - y1, x2 - x1);
         const len = Math.hypot(x2 - x1, y2 - y1);
@@ -377,105 +567,403 @@ export default function ScreenshotApp() {
         ctx.fill();
       }
     }
-  }, [drawAnnotations, region, tool, dragging, color, size, dragStart, dragCurrent]);
+  }, [drawAnnotations, tool, dragging, color, size, canvasReady]);
 
-  useEffect(() => { redraw(); }, [redraw]);
+  // Coalesce repaints into one per animation frame. Multiple state updates or
+  // mousemove events inside the same frame collapse into a single canvas pass.
+  //
+  // A pending frame is re-armed, never skipped: its callback closed over the
+  // `dragging`/`rects`/... values of the render that scheduled it. mouseup flips
+  // dragging→false AND appends the shape in one batch, so a stale queued frame
+  // would paint the old state (live preview, no committed shape) and then clear
+  // rafRef with nobody left to schedule the real repaint — rectangles and arrows
+  // silently vanished until an unrelated redraw happened to fire.
+  const scheduleRedraw = useCallback(() => {
+    if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = null;
+      redraw();
+    });
+  }, [redraw]);
+
+  useEffect(() => { scheduleRedraw(); }, [scheduleRedraw]);
 
   // Cancel any pending pen rAF on unmount to avoid a stray redraw.
   useEffect(() => () => { if (rafRef.current != null) cancelAnimationFrame(rafRef.current); }, []);
 
+  // Measure the toolbar so its horizontal clamping matches reality (the button
+  // set changes with tool/phase, so a hardcoded width drifts).
+  useEffect(() => {
+    const el = toolbarRef.current;
+    if (!el) return;
+    const w = el.offsetWidth;
+    if (w > 0 && Math.abs(w - toolbarW) > 1) setToolbarW(w);
+  }, [phase, tool, region, pinned, toolbarW]);
+
+  // Hit-test the 8 resize grips of the current region. Tolerance is expressed in
+  // SCREEN pixels then converted to image space so the grab area feels the same
+  // regardless of how much the screenshot is scaled to fit the viewport.
+  const hitHandle = useCallback((p: Point, r: Region): HandleId | null => {
+    const canvas = canvasRef.current;
+    const box = canvas?.getBoundingClientRect();
+    const sx = canvas && box ? canvas.width / (box.width || 1) : 1;
+    const tol = 10 * sx;
+    const midX = r.x + r.w / 2;
+    const midY = r.y + r.h / 2;
+    const pts: Record<HandleId, Point> = {
+      nw: { x: r.x, y: r.y },
+      n: { x: midX, y: r.y },
+      ne: { x: r.x + r.w, y: r.y },
+      e: { x: r.x + r.w, y: midY },
+      se: { x: r.x + r.w, y: r.y + r.h },
+      s: { x: midX, y: r.y + r.h },
+      sw: { x: r.x, y: r.y + r.h },
+      w: { x: r.x, y: midY },
+    };
+    for (const h of HANDLES) {
+      if (Math.abs(p.x - pts[h].x) <= tol && Math.abs(p.y - pts[h].y) <= tol) return h;
+    }
+    return null;
+  }, []);
+
+  const insideRegion = (p: Point, r: Region) =>
+    p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
+
+  // Measure a text annotation's on-image bounding box (wrapped), so it can be
+  // hit-tested for click-to-edit and outlined when selected.
+  const textBounds = useCallback((t: TextAnnotation) => {
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    const fontPx = 12 + t.size * 4;
+    const lineH = Math.round(fontPx * 1.32);
+    // Before the canvas is sized its context measures against a stale font, which
+    // would make click-to-edit hit-testing miss; fall back to the wrap width.
+    if (!ctx || !canvasReady) return { x: t.x, y: t.y, w: t.maxW, h: lineH };
+    ctx.save();
+    ctx.font = `600 ${fontPx}px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`;
+    const lines = wrapText(ctx, t.text, t.maxW);
+    let w = 0;
+    for (const ln of lines) w = Math.max(w, ctx.measureText(ln).width);
+    ctx.restore();
+    return { x: t.x, y: t.y, w, h: Math.max(1, lines.length) * lineH };
+  }, [canvasReady]);
+
+  // Topmost text annotation under a point (iterates newest-first).
+  const textAt = useCallback((p: Point): TextAnnotation | null => {
+    for (let i = texts.length - 1; i >= 0; i--) {
+      const b = textBounds(texts[i]);
+      const pad = 4;
+      if (p.x >= b.x - pad && p.x <= b.x + b.w + pad && p.y >= b.y - pad && p.y <= b.y + b.h + pad) {
+        return texts[i];
+      }
+    }
+    return null;
+  }, [texts, textBounds]);
+
+  // Wrap width available from an insertion point: to the right edge of the active
+  // region (or the image), less a small margin. Guarantees text never overflows.
+  const wrapWidthAt = useCallback((p: Point) => {
+    const img = imgRef.current;
+    const right = region ? region.x + region.w : (img?.width ?? 0);
+    return Math.max(60, right - p.x - 8);
+  }, [region]);
+
+  // Guards the text editor against double-commit. The OK button's click and the
+  // textarea's blur can both fire for a single edit session, and each carries its
+  // own stale `textInput` closure — so without a lock the same annotation gets
+  // appended twice, or one the user just cancelled gets resurrected.
+  const submitLockRef = useRef(false);
+  // True while an IME candidate window is open (pinyin/kana being composed).
+  const composingRef = useRef(false);
+  const textAreaRef = useRef<HTMLTextAreaElement | null>(null);
+  // False until the editor has been focused for at least one frame. Blur is only
+  // allowed to commit after that, so a focus steal during mount can never
+  // silently close a freshly-opened editor.
+  const editorReadyRef = useRef(false);
+
+  // Focus the editor explicitly once it is laid out, instead of relying on
+  // `autoFocus`. autoFocus runs during commit, which races the browser's native
+  // focus handling for the very mousedown that opened the editor; doing it on the
+  // next frame means we always win, and editorReadyRef gates the blur-commit
+  // until then.
+  useEffect(() => {
+    editorReadyRef.current = false;
+    if (!textInput) return;
+    const id = requestAnimationFrame(() => {
+      textAreaRef.current?.focus();
+      editorReadyRef.current = true;
+    });
+    return () => cancelAnimationFrame(id);
+  }, [textInput]);
+
+  /** Discard the editor without committing, and make sure a pending blur cannot
+   *  re-commit the discarded draft. */
+  const cancelText = useCallback(() => {
+    submitLockRef.current = true;
+    setTextInput(null);
+    setTextValue("");
+    setSelectedTextId(null);
+  }, []);
+
+  // Open the text editor on an existing annotation (second-pass editing).
+  const beginEditText = (t: TextAnnotation) => {
+    submitLockRef.current = false;
+    setTool("text");
+    setTextInput({ x: t.x, y: t.y, maxW: t.maxW, id: t.id });
+    setTextValue(t.text);
+    setColor(t.color);
+    setSize(t.size);
+    setSelectedTextId(t.id);
+  };
+
+  // Flush the ref-held region into React state at most once per frame.
+  const regionFlushRef = useRef<number | null>(null);
+  const scheduleRegionFlush = useCallback(() => {
+    if (regionFlushRef.current != null) return;
+    regionFlushRef.current = requestAnimationFrame(() => {
+      regionFlushRef.current = null;
+      if (regionRef.current) setRegion(regionRef.current);
+    });
+  }, []);
+
   // Mouse handlers — behaviour depends on active tool.
   const handleMouseDown = (e: React.MouseEvent) => {
     const p = toImageCoords(e);
+
+    // Text tool: click an existing text to edit it in place, else start a new one.
     if (tool === "text") {
-      setTextInput(p);
+      // Suppress the browser's default focus handling for this press. It would
+      // move focus to <body> AFTER React has committed the editor and focused
+      // the textarea, and the resulting blur tore the editor straight back down
+      // (see the focus effect above) — the box looked like it never opened.
+      e.preventDefault();
+      const hit = textAt(p);
+      if (hit) { beginEditText(hit); return; }
+      submitLockRef.current = false;
+      setTextInput({ x: p.x, y: p.y, maxW: wrapWidthAt(p) });
       setTextValue("");
+      setSelectedTextId(null);
       return;
     }
+
+    // Select tool: clicking a text selects it (Delete removes, dblclick edits).
+    if (tool === "select") {
+      const hit = textAt(p);
+      if (hit) { setSelectedTextId(hit.id); return; }
+      setSelectedTextId(null);
+    }
+
+    // With the select tool and an existing region, grips take priority: dragging
+    // a grip resizes, dragging inside moves, dragging outside starts a new box.
+    if (tool === "select" && region) {
+      const h = hitHandle(p, region);
+      if (h) { setRegionDrag({ kind: "resize", handle: h, start: p, orig: region }); return; }
+      if (insideRegion(p, region)) { setRegionDrag({ kind: "move", start: p, orig: region }); return; }
+    }
+
     if (tool === "pen") {
       setDragging(true);
       penBufRef.current = [p];
-      redraw();
+      scheduleRedraw();
       return;
     }
-    // select / rect / arrow all start a drag
-    if (tool === "select" || tool === "rect" || tool === "arrow") {
+    // select / rect / arrow / mosaic all start a drag. Endpoints live in refs so
+    // mousemove doesn't force a React render per event.
+    if (tool === "select" || tool === "rect" || tool === "arrow" || tool === "mosaic") {
       setDragging(true);
+      dragStartRef.current = p;
+      dragCurRef.current = p;
       setDragStart(p);
       setDragCurrent(p);
     }
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
-    if (!dragging) return;
     const p = toImageCoords(e);
+
+    // Region move / resize takes precedence over annotation drawing.
+    if (regionDrag) {
+      const img = imgRef.current;
+      const maxW = img?.width ?? Number.MAX_SAFE_INTEGER;
+      const maxH = img?.height ?? Number.MAX_SAFE_INTEGER;
+      const dx = p.x - regionDrag.start.x;
+      const dy = p.y - regionDrag.start.y;
+      const o = regionDrag.orig;
+
+      if (regionDrag.kind === "move") {
+        // Translate, clamped so the box never leaves the screenshot bounds.
+        const nx = Math.min(Math.max(0, o.x + dx), maxW - o.w);
+        const ny = Math.min(Math.max(0, o.y + dy), maxH - o.h);
+        regionRef.current = { x: nx, y: ny, w: o.w, h: o.h };
+        scheduleRegionFlush();
+        return;
+      }
+
+      // Resize: derive the new edges from which grip is being dragged, then
+      // normalise so dragging past the opposite edge flips instead of inverting.
+      let left = o.x;
+      let top = o.y;
+      let right = o.x + o.w;
+      let bottom = o.y + o.h;
+      const hd = regionDrag.handle;
+      if (hd.includes("w")) left = o.x + dx;
+      if (hd.includes("e")) right = o.x + o.w + dx;
+      if (hd.includes("n")) top = o.y + dy;
+      if (hd.includes("s")) bottom = o.y + o.h + dy;
+      const nx = Math.max(0, Math.min(left, right));
+      const ny = Math.max(0, Math.min(top, bottom));
+      const nw = Math.min(Math.abs(right - left), maxW - nx);
+      const nh = Math.min(Math.abs(bottom - top), maxH - ny);
+      regionRef.current = {
+        x: nx,
+        y: ny,
+        w: Math.max(MIN_REGION, nw),
+        h: Math.max(MIN_REGION, nh),
+      };
+      scheduleRegionFlush();
+      return;
+    }
+
+    if (!dragging) return;
     if (tool === "pen") {
       // Push into the ref buffer and repaint via rAF (throttled) — avoids a
       // React re-render + full redraw on every single mousemove event.
       penBufRef.current.push(p);
-      if (rafRef.current == null) {
-        rafRef.current = requestAnimationFrame(() => {
-          rafRef.current = null;
-          redraw();
-        });
-      }
+      scheduleRedraw();
     } else {
+      // Rect / arrow / mosaic / region-select: refs drive the canvas preview,
+      // React state only feeds the DOM preview box.
+      dragCurRef.current = p;
+      scheduleRedraw();
       setDragCurrent(p);
     }
   };
 
   const handleMouseUp = () => {
+    // Finish a region move/resize without touching annotation state.
+    if (regionDrag) {
+      if (regionFlushRef.current != null) {
+        cancelAnimationFrame(regionFlushRef.current);
+        regionFlushRef.current = null;
+      }
+      if (regionRef.current) setRegion(regionRef.current);
+      setRegionDrag(null);
+      return;
+    }
     if (!dragging) return;
     setDragging(false);
 
-    const x = Math.min(dragStart.x, dragCurrent.x);
-    const y = Math.min(dragStart.y, dragCurrent.y);
-    const w = Math.abs(dragCurrent.x - dragStart.x);
-    const h = Math.abs(dragCurrent.y - dragStart.y);
+    const a = dragStartRef.current;
+    const b = dragCurRef.current;
+    const x = Math.min(a.x, b.x);
+    const y = Math.min(a.y, b.y);
+    const w = Math.abs(b.x - a.x);
+    const h = Math.abs(b.y - a.y);
 
     if (tool === "select") {
-      if (w > 8 && h > 8) {
-        setRegion({ x, y, w, h });
+      if (w > MIN_REGION && h > MIN_REGION) {
+        const r = { x, y, w, h };
+        setRegion(r);
+        regionRef.current = r;
         // Region chosen → reveal the annotation toolbar and switch to edit phase.
         setPhase("edit");
-      } else {
-        setRegion(null); // tiny drag → clear region (whole image)
       }
+      // A tiny drag is treated as a stray click: keep any existing region so the
+      // user doesn't lose their selection by accidentally tapping the canvas.
     } else if (tool === "rect") {
-      if (w > 5 && h > 5) setRects((prev) => [...prev, { id: crypto.randomUUID(), x, y, w, h, color, size }]);
+      if (w > 5 && h > 5) setRects((prev) => [...prev, { id: crypto.randomUUID(), seq: ++seqRef.current, x, y, w, h, color, size }]);
+    } else if (tool === "mosaic") {
+      // Mosaic reuses the stroke-size selector to pick block coarseness.
+      if (w > 5 && h > 5) setMosaics((prev) => [...prev, { id: crypto.randomUUID(), seq: ++seqRef.current, x, y, w, h, block: MOSAIC_BLOCK[size] }]);
     } else if (tool === "arrow") {
-      const dist = Math.hypot(dragCurrent.x - dragStart.x, dragCurrent.y - dragStart.y);
-      if (dist > 8) setArrows((prev) => [...prev, { id: crypto.randomUUID(), x1: dragStart.x, y1: dragStart.y, x2: dragCurrent.x, y2: dragCurrent.y, color, size }]);
+      const dist = Math.hypot(b.x - a.x, b.y - a.y);
+      if (dist > 8) setArrows((prev) => [...prev, { id: crypto.randomUUID(), seq: ++seqRef.current, x1: a.x, y1: a.y, x2: b.x, y2: b.y, color, size }]);
     } else if (tool === "pen") {
       // Flush the rAF-buffered points into committed state on release.
       if (rafRef.current != null) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
       const pts = penBufRef.current;
-      if (pts.length > 1) setPens((prev) => [...prev, { id: crypto.randomUUID(), points: pts, color, size }]);
+      if (pts.length > 1) setPens((prev) => [...prev, { id: crypto.randomUUID(), seq: ++seqRef.current, points: pts, color, size }]);
       penBufRef.current = [];
     }
   };
 
-  // Text submit
+  // Double-click = copy, or re-open a text annotation for editing when one sits
+  // under the cursor. Inside a region it copies that region; with no region yet
+  // it copies the whole screenshot.
+  const handleDoubleClick = (e: React.MouseEvent) => {
+    if (textInput) return;            // don't hijack dblclick in the text field
+    if (tool !== "select") return;     // annotation tools keep their own gestures
+    const p = toImageCoords(e);
+    const hit = textAt(p);
+    if (hit) { beginEditText(hit); return; }
+    if (region && !insideRegion(p, region)) return; // dblclick outside = ignore
+    handleCopy();
+  };
+
+  // Commit the text editor: updates in place when editing an existing annotation
+  // (textInput.id set), otherwise appends a new one.
   const submitText = () => {
-    if (textInput && textValue.trim()) {
-      setTexts((prev) => [...prev, { id: crypto.randomUUID(), x: textInput.x, y: textInput.y, text: textValue.trim(), color, size }]);
+    // One edit session commits at most once (see submitLockRef).
+    if (submitLockRef.current) return;
+    submitLockRef.current = true;
+    const draft = textInput;
+    const val = textValue.trim();
+    if (draft) {
+      if (draft.id) {
+        // Empty text on an existing annotation means "delete it".
+        if (!val) {
+          setTexts((prev) => prev.filter((t) => t.id !== draft.id));
+        } else {
+          setTexts((prev) => prev.map((t) => (
+            t.id === draft.id ? { ...t, text: val, color, size } : t
+          )));
+        }
+      } else if (val) {
+        setTexts((prev) => [...prev, {
+          id: crypto.randomUUID(),
+          seq: ++seqRef.current,
+          x: draft.x,
+          y: draft.y,
+          text: val,
+          color,
+          size,
+          maxW: draft.maxW,
+        }]);
+      }
     }
     setTextInput(null);
     setTextValue("");
+    setSelectedTextId(null);
   };
 
-  // Undo the most recently added annotation (any type, by insertion time is
-  // approximated by removing from whichever list has the newest item — here we
-  // simply pop from a priority: text > pen > arrow > rect for simplicity).
+  /** Delete the currently selected text annotation (Delete / toolbar button). */
+  const deleteSelectedText = () => {
+    if (!selectedTextId) return;
+    setTexts((prev) => prev.filter((t) => t.id !== selectedTextId));
+    setSelectedTextId(null);
+  };
+
+  // Undo the most recently added annotation by real insertion order (seq),
+  // so Ctrl+Z always removes the last thing the user actually drew.
   const undoLast = () => {
-    if (texts.length) { setTexts((p) => p.slice(0, -1)); return; }
-    if (pens.length) { setPens((p) => p.slice(0, -1)); return; }
-    if (arrows.length) { setArrows((p) => p.slice(0, -1)); return; }
-    if (rects.length) { setRects((p) => p.slice(0, -1)); return; }
+    const lastSeq = <T extends Ordered>(list: T[]) => (list.length ? list[list.length - 1].seq : -1);
+    const rSeq = lastSeq(rects);
+    const aSeq = lastSeq(arrows);
+    const pSeq = lastSeq(pens);
+    const tSeq = lastSeq(texts);
+    const mSeq = lastSeq(mosaics);
+    const newest = Math.max(rSeq, aSeq, pSeq, tSeq, mSeq);
+    if (newest < 0) return;
+    if (tSeq === newest) { setTexts((p) => p.slice(0, -1)); return; }
+    if (mSeq === newest) { setMosaics((p) => p.slice(0, -1)); return; }
+    if (pSeq === newest) { setPens((p) => p.slice(0, -1)); return; }
+    if (aSeq === newest) { setArrows((p) => p.slice(0, -1)); return; }
+    setRects((p) => p.slice(0, -1));
   };
 
   const clearAll = () => {
-    setRects([]); setArrows([]); setPens([]); setTexts([]);
+    setRects([]); setArrows([]); setPens([]); setTexts([]); setMosaics([]);
+    setSelectedTextId(null);
   };
 
   // Pin / unpin toggle (deferred pin: pins after next Copy). Keeps existing
@@ -536,7 +1024,7 @@ export default function ScreenshotApp() {
     const fctx = full.getContext("2d");
     if (!fctx) return canvas.toDataURL("image/png");
     fctx.drawImage(img, 0, 0);
-    drawAnnotations(fctx); // <- rects / arrows / pens / texts included
+    drawAnnotations(fctx, img); // <- mosaic / rects / arrows / pens / texts included
 
     if (!region) return full.toDataURL("image/png");
 
@@ -601,6 +1089,7 @@ export default function ScreenshotApp() {
     } catch { /* ignore */ }
     clearAll();
     setRegion(null);
+    regionRef.current = null;
     setPhase("select");
     setTool("select");
     setImagePath(null);
@@ -611,27 +1100,71 @@ export default function ScreenshotApp() {
     await closeOverlay();
   };
 
-  // ESC to cancel — re-bind so the handler always sees fresh state.
+  // Keyboard shortcuts — re-bound each render so handlers see fresh state.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      const mod = e.ctrlKey || e.metaKey;
+
+      // Never let global shortcuts act on keystrokes aimed at a text field, no
+      // matter what this closure believes `textInput` to be. The editor stops its
+      // own events, so reaching here with an editable target means the state and
+      // the live DOM disagree (mid-teardown re-bind) — trust the DOM.
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === "TEXTAREA" || target.tagName === "INPUT" || target.isContentEditable)) {
+        return;
+      }
+
+      // While the text-annotation field is open, only ESC is meaningful here;
+      // everything else belongs to the input itself.
+      if (textInput) {
+        if (e.key === "Escape") { cancelText(); }
+        return;
+      }
+
       if (e.key === "Escape") {
-        if (textInput) { setTextInput(null); setTextValue(""); return; }
-        // In edit phase, ESC first goes back to region selection instead of
+        // A selected text de-selects first, so ESC doesn't jump straight out.
+        if (selectedTextId) { setSelectedTextId(null); return; }
+        // In edit phase, ESC then goes back to region selection instead of
         // closing outright, so users can re-frame without re-triggering capture.
-        if (phase === "edit") { setPhase("select"); setTool("select"); setRegion(null); return; }
+        if (phase === "edit") { setPhase("select"); setTool("select"); setRegion(null); regionRef.current = null; return; }
         handleCancel();
-      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+        return;
+      }
+
+      if (mod && e.key.toLowerCase() === "z") { e.preventDefault(); undoLast(); return; }
+      if (mod && e.key.toLowerCase() === "s") { e.preventDefault(); handleSave(); return; }
+      if (mod && e.key.toLowerCase() === "c") { e.preventDefault(); handleCopy(); return; }
+      if (mod && e.key.toLowerCase() === "d") { e.preventDefault(); handlePin(); return; }
+
+      // Delete / Backspace removes the selected text annotation.
+      if ((e.key === "Delete" || e.key === "Backspace") && selectedTextId) {
         e.preventDefault();
-        undoLast();
+        deleteSelectedText();
+        return;
+      }
+
+      // Enter confirms the capture (copy) once a region exists.
+      if (e.key === "Enter" && phase === "edit") { e.preventDefault(); handleCopy(); return; }
+
+      // Bare number/letter keys switch tools — only useful in edit phase.
+      if (phase !== "edit" || mod || e.altKey) return;
+      switch (e.key) {
+        case "1": setTool("rect"); break;
+        case "2": setTool("arrow"); break;
+        case "3": setTool("pen"); break;
+        case "4": setTool("text"); break;
+        case "5": setTool("mosaic"); break;
+        case "v": case "V": setTool("select"); break;
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [textInput, texts, pens, arrows, rects, phase]);
+  }, [textInput, texts, pens, arrows, rects, mosaics, phase, region, pinned, selectedTextId]);
 
-  // Preview shape while dragging (image-space)
-  const previewBox = dragging && (tool === "rect" || tool === "select") ? {
+  // Preview shape while dragging (image-space). Mosaic shares the rect preview
+  // outline so the user can see the area being censored before release.
+  const previewBox = dragging && (tool === "rect" || tool === "select" || tool === "mosaic") ? {
     x: Math.min(dragStart.x, dragCurrent.x),
     y: Math.min(dragStart.y, dragCurrent.y),
     w: Math.abs(dragCurrent.x - dragStart.x),
@@ -657,12 +1190,32 @@ export default function ScreenshotApp() {
   // that we show a lightweight hint so the flow is: capture → drag → toolbar.
   const showToolbar = phase === "edit";
 
+  // Screen-space rect of the current region, used by the DOM dim mask and the
+  // selected-text outline. Kept here so the JSX stays readable.
+  const regionBox = region ? {
+    left: region.x * scale.sx,
+    top: region.y * scale.sy,
+    width: region.w * scale.sx,
+    height: region.h * scale.sy,
+  } : null;
+
+  // Bounding box (screen space) of the selected text annotation, for its outline.
+  const selectedText = texts.find((t) => t.id === selectedTextId) ?? null;
+  const selectedBox = selectedText ? (() => {
+    const b = textBounds(selectedText);
+    return {
+      left: b.x * scale.sx - 3,
+      top: b.y * scale.sy - 3,
+      width: b.w * scale.sx + 6,
+      height: b.h * scale.sy + 6,
+    };
+  })() : null;
+
   // Position the toolbar just BELOW the selected region (Snipaste-style) instead
   // of pinning it to the screen bottom. Falls back to above the region when there
   // isn't enough room underneath, and is clamped horizontally to stay on-screen.
   const TOOLBAR_H = 46;      // approx toolbar height incl. padding
   const TOOLBAR_GAP = 8;     // gap between region edge and toolbar
-  const EST_TOOLBAR_W = 560; // approx toolbar width for clamping
   const toolbarStyle: React.CSSProperties = (() => {
     if (!region) {
       return { left: "50%", bottom: 28, transform: "translateX(-50%)" };
@@ -680,9 +1233,10 @@ export default function ScreenshotApp() {
       // If also no room above (tiny/edge region), tuck it inside the bottom.
       if (top < 4) top = Math.max(4, vh - TOOLBAR_H - 4);
     }
-    // Horizontal: centre on the region, then clamp within the viewport.
+    // Horizontal: centre on the region, then clamp within the viewport using the
+    // MEASURED toolbar width so edge selections never push it off-screen.
     let left = (regLeft + regRight) / 2;
-    const half = EST_TOOLBAR_W / 2;
+    const half = toolbarW / 2;
     left = Math.min(Math.max(left, half + 4), vw - half - 4);
     return { left, top, transform: "translateX(-50%)" };
   })();
@@ -710,9 +1264,21 @@ export default function ScreenshotApp() {
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseUp}
+        onDoubleClick={handleDoubleClick}
       >
-        <canvas ref={canvasRef} className="screenshot-canvas" />
-        {/* Live preview box for rect / region select */}
+        {/* Base layer: the screenshot, blitted once. Never repainted. */}
+        <canvas ref={baseRef} className="screenshot-canvas" />
+        {/* Annotation layer: cleared + repainted per frame (cheap — no image blit). */}
+        <canvas ref={canvasRef} className="screenshot-canvas screenshot-canvas-overlay" />
+
+        {/* Dim mask as a GPU-composited DOM layer. Using an outer box-shadow means
+            the darkened area costs nothing to move, so dragging/resizing the
+            region stays smooth even on 4K displays. */}
+        {regionBox && !previewBox && (
+          <div className="sc-dim-mask" style={regionBox} />
+        )}
+
+        {/* Live preview box for rect / mosaic / region select */}
         {previewBox && (
           <div
             className={tool === "select" ? "screenshot-region-preview" : "screenshot-rect-preview"}
@@ -725,35 +1291,127 @@ export default function ScreenshotApp() {
             }}
           />
         )}
-      </div>
 
-      {/* Text input popup — renders WYSIWYG (matches chosen colour & size). */}
-      {textInput && (
-        <div className="text-input-popup" style={{ left: textInput.x * scale.sx, top: textInput.y * scale.sy }}>
-          <input
-            autoFocus
+        {/* Live W×H readout while dragging a new region */}
+        {previewBox && tool === "select" && (
+          <div
+            className="sc-dim-label"
+            style={{
+              left: previewBox.x * scale.sx,
+              top: Math.max(2, previewBox.y * scale.sy - 24),
+            }}
+          >
+            {Math.round(previewBox.w)} × {Math.round(previewBox.h)}
+          </div>
+        )}
+
+        {/* Outline + quick-delete for the selected text annotation. */}
+        {selectedBox && !textInput && (
+          <>
+            <div className="sc-text-selected" style={selectedBox} />
+            <button
+              className="sc-text-del"
+              style={{ left: selectedBox.left + selectedBox.width + 4, top: selectedBox.top }}
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => { e.stopPropagation(); deleteSelectedText(); }}
+              title="删除此文字 (Delete)"
+            ><IconTrash size={13} /></button>
+          </>
+        )}
+
+        {/* Region grips + size readout (edit phase, select tool) — lets the user
+            fine-tune the crop instead of redrawing it from scratch. */}
+        {region && tool === "select" && !previewBox && (
+          <>
+            <div
+              className="sc-region-move"
+              style={{
+                left: region.x * scale.sx,
+                top: region.y * scale.sy,
+                width: region.w * scale.sx,
+                height: region.h * scale.sy,
+              }}
+            />
+            {HANDLES.map((h) => {
+              const left = region.x * scale.sx + (h.includes("e") ? region.w * scale.sx : h.includes("w") ? 0 : region.w * scale.sx / 2);
+              const top = region.y * scale.sy + (h.includes("s") ? region.h * scale.sy : h.includes("n") ? 0 : region.h * scale.sy / 2);
+              return <div key={h} className={`sc-handle sc-handle-${h}`} style={{ left, top }} />;
+            })}
+            <div
+              className="sc-dim-label"
+              style={{
+                left: region.x * scale.sx,
+                top: Math.max(2, region.y * scale.sy - 24),
+              }}
+            >
+              {Math.round(region.w)} × {Math.round(region.h)}
+            </div>
+          </>
+        )}
+
+        {/* Text editor — a textarea so Shift+Enter adds explicit line breaks, sized
+            to the wrap width so what you type matches what gets drawn.
+            Must stay INSIDE the canvas wrapper: it is positioned with the same
+            image→screen scale as the region grips, so parenting it to the outer
+            flex container offset it by the toolbar/hint height and pushed it
+            outside the viewport for clicks low in the image. */}
+        {textInput && (
+        <div
+          className="text-input-popup"
+          style={{ left: textInput.x * scale.sx, top: textInput.y * scale.sy }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <textarea
+            ref={textAreaRef}
+            rows={1}
             className="text-input-field"
             value={textValue}
-            style={{ color, fontSize: (12 + size * 4) * scale.sx, fontWeight: 600 }}
+            style={{
+              color,
+              fontSize: (12 + size * 4) * scale.sx,
+              fontWeight: 600,
+              width: Math.max(80, textInput.maxW * scale.sx),
+              lineHeight: 1.32,
+            }}
             onChange={(e) => setTextValue(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") submitText(); if (e.key === "Escape") { setTextInput(null); setTextValue(""); } }}
-            onBlur={() => { setTimeout(() => { if (textValue.trim()) submitText(); }, 120); }}
-            placeholder="输入文字… (Enter 确认)"
+            onCompositionStart={() => { composingRef.current = true; }}
+            onCompositionEnd={() => { composingRef.current = false; }}
+            onKeyDown={(e) => {
+              // Everything typed here belongs to the editor — stop the event before it
+              // reaches the window-level shortcut handler. preventDefault() alone is
+              // NOT enough: submitText() flips textInput to null, React flushes that
+              // synchronously and re-binds the window listener with a fresh closure,
+              // and the still-bubbling keypress then hits that new listener with the
+              // "editor closed" guard — Enter fell straight through to handleCopy()
+              // and captured the screenshot mid-sentence.
+              e.stopPropagation();
+              // While an IME is composing, Enter belongs to the candidate window —
+              // committing here would drop the raw pinyin onto the canvas instead
+              // of the characters the user actually picked.
+              if (e.nativeEvent.isComposing || composingRef.current) return;
+              // Enter commits; Shift+Enter inserts a hard line break.
+              if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submitText(); }
+              if (e.key === "Escape") { e.preventDefault(); cancelText(); }
+            }}
+            onBlur={() => { if (editorReadyRef.current && !composingRef.current) submitText(); }}
+            placeholder={textInput.id ? "编辑文字… (Enter 保存 / 清空则删除)" : "输入文字… (Enter 确认，Shift+Enter 换行)"}
           />
-          <button className="text-input-ok" onMouseDown={(e) => e.preventDefault()} onClick={submitText}>✓</button>
+          <button className="text-input-ok" onMouseDown={(e) => e.preventDefault()} onClick={submitText}><IconCheck size={15} /></button>
         </div>
-      )}
+        )}
+      </div>
 
       {/* Selection hint (before a region is chosen) */}
       {!showToolbar && !textInput && (
-        <div className="sc-hint">拖拽鼠标框选区域 · Esc 取消</div>
+        <div className="sc-hint">拖拽鼠标框选区域 · 双击复制全屏 · Esc 取消</div>
       )}
 
       {/* Toolbar */}
       {showToolbar && (
-      <div className="screenshot-toolbar" style={toolbarStyle}>
-        {/* Re-select region */}
-        <button className={`sc-tool-btn ${tool === "select" ? "active" : ""}`} onClick={() => { setTool("select"); setPhase("select"); setRegion(null); }} title="重新选择区域（拖拽框选）">✂</button>
+      <div className="screenshot-toolbar" ref={toolbarRef} style={toolbarStyle}>
+        {/* Select / adjust region — keeps the existing box so the grips can be used
+            for fine-tuning instead of forcing a redraw from scratch. */}
+        <button className={`sc-tool-btn ${tool === "select" ? "active" : ""}`} onClick={() => { setTool("select"); }} title="选择/调整区域 (V) — 拖边角手柄改大小，框内拖动可移动"><IconCrop /></button>
         <div className="sc-toolbar-sep" />
 
         {/* Annotation tools */}
@@ -763,7 +1421,7 @@ export default function ScreenshotApp() {
             className={`sc-tool-btn ${tool === t.key ? "active" : ""}`}
             onClick={() => setTool(t.key)}
             title={t.label}
-          >{t.icon}</button>
+          ><t.Icon /></button>
         ))}
         <div className="sc-toolbar-sep" />
 
@@ -797,19 +1455,19 @@ export default function ScreenshotApp() {
         <div className="sc-toolbar-sep" />
 
         {/* Edit ops */}
-        <button className="sc-tool-btn" onClick={undoLast} title="撤销 (Ctrl+Z)">↶</button>
-        <button className="sc-tool-btn" onClick={clearAll} title="清除所有标注">⊘</button>
+        <button className="sc-tool-btn" onClick={undoLast} title="撤销 (Ctrl+Z)"><IconUndo /></button>
+        <button className="sc-tool-btn" onClick={clearAll} title="清除所有标注"><IconClear /></button>
         <div className="sc-toolbar-sep" />
 
         {/* Pin / comparison */}
-        <button className={`sc-tool-btn ${pinned ? "active" : ""}`} onClick={togglePin} title="复制后把选区固定在屏幕上方供对比">📌</button>
-        <button className="sc-tool-btn" onClick={handlePin} title="直接把当前选区固定浮在屏幕上方，方便与其他应用对比">🖼</button>
+        <button className={`sc-tool-btn ${pinned ? "active" : ""}`} onClick={togglePin} title="复制后把选区固定在屏幕上方供对比"><IconPin /></button>
+        <button className="sc-tool-btn" onClick={handlePin} title="贴图：把当前选区固定浮在屏幕上方 (Ctrl+D)"><IconSticker /></button>
         <div className="sc-toolbar-sep" />
 
         {/* Output */}
-        <button className="sc-tool-btn sc-save-btn" onClick={handleSave} title="保存到文件">💾</button>
-        <button className="sc-tool-btn sc-copy-btn" onClick={handleCopy} title="复制到剪贴板">📋</button>
-        <button className="sc-tool-btn sc-cancel-btn" onClick={handleCancel} title="取消 (Esc)">✕</button>
+        <button className="sc-tool-btn sc-save-btn" onClick={handleSave} title="保存到文件 (Ctrl+S)"><IconSave /></button>
+        <button className="sc-tool-btn sc-copy-btn" onClick={handleCopy} title="复制到剪贴板 (Ctrl+C / Enter / 双击选区)"><IconCopy /></button>
+        <button className="sc-tool-btn sc-cancel-btn" onClick={handleCancel} title="取消 (Esc)"><IconClose /></button>
       </div>
       )}
     </div>

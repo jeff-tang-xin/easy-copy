@@ -271,6 +271,35 @@
 
 /* ===== Cron ===== */
 
+.cron-mode-switch {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.cron-mode-btn {
+  padding: 6px 14px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.cron-mode-btn:hover {
+  background-color: var(--bg-hover);
+  color: var(--accent);
+}
+
+.cron-mode-btn.active {
+  background-color: var(--accent);
+  color: var(--bg-primary);
+  border-color: var(--accent);
+}
+
 .cron-fields {
   display: flex;
   gap: 10px;
@@ -403,4 +432,434 @@
   padding: 1px 3px;
   color: var(--accent);
   font-weight: 600;
+}
+
+/* =============================================================
+ * JSON viewer (proxy log bodies)
+ * All colors come from the theme tokens so light/dark both work.
+ * ============================================================= */
+
+.json-view,
+.jv-raw {
+  font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.65;
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow: auto;
+  max-height: 340px;
+}
+
+.jv-raw {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-secondary);
+}
+
+.jv-row {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.jv-clickable {
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.jv-clickable:hover {
+  background-color: var(--bg-hover);
+}
+
+/* Disclosure triangle for objects/arrays. */
+.jv-caret {
+  display: inline-block;
+  width: 12px;
+  font-size: 8px;
+  color: var(--text-muted);
+  transition: transform 0.12s ease;
+  transform: rotate(0deg);
+  vertical-align: 1px;
+}
+
+.jv-caret.open {
+  transform: rotate(90deg);
+}
+
+/* Token colors — the whole point of this change. */
+.jv-key {
+  color: var(--accent);
+}
+
+.jv-string {
+  color: var(--green);
+}
+
+.jv-url {
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+.jv-number {
+  color: var(--orange);
+}
+
+.jv-boolean {
+  color: var(--red);
+  font-weight: 600;
+}
+
+.jv-null {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.jv-punct {
+  color: var(--text-muted);
+}
+
+.jv-summary {
+  color: var(--text-muted);
+  font-style: italic;
+  margin: 0 6px;
+  font-size: 11px;
+}
+
+.jv-empty {
+  color: var(--text-muted);
+  font-style: italic;
+  font-size: 12px;
+  padding: 6px 2px;
+}
+
+/* =============================================================
+ * Proxy request log list
+ * ============================================================= */
+
+.req-log-list {
+  max-height: 260px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.req-log-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
+  font-size: 12px;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+
+.req-log-row:hover {
+  background-color: var(--bg-hover);
+}
+
+.req-log-row.selected {
+  background-color: var(--accent-dim);
+  border-color: var(--accent);
+}
+
+.req-log-url {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+.req-log-route {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background-color: var(--bg-tertiary);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.req-log-dur {
+  color: var(--text-muted);
+  min-width: 48px;
+  text-align: right;
+}
+
+/* Status pill: green / amber / red by HTTP class. */
+.log-status {
+  min-width: 38px;
+  text-align: center;
+  font-weight: 700;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.log-status.ok {
+  color: var(--green);
+  background-color: rgba(158, 206, 106, 0.14);
+}
+
+.log-status.warn {
+  color: var(--orange);
+  background-color: rgba(224, 175, 104, 0.16);
+}
+
+.log-status.err {
+  color: var(--red);
+  background-color: var(--danger-bg);
+}
+
+/* Method label, tinted per verb so GET/POST/DELETE are separable at a glance. */
+.log-method {
+  min-width: 52px;
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.log-method.m-get {
+  color: var(--green);
+}
+
+.log-method.m-post {
+  color: var(--accent);
+}
+
+.log-method.m-put,
+.log-method.m-patch {
+  color: var(--orange);
+}
+
+.log-method.m-delete {
+  color: var(--red);
+}
+
+.activity-log {
+  max-height: 120px;
+  overflow-y: auto;
+  font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
+  font-size: 12px;
+}
+
+.activity-row {
+  padding: 2px 0;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* =============================================================
+ * Proxy log detail modal
+ * ============================================================= */
+
+.log-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  backdrop-filter: blur(2px);
+}
+
+.log-modal {
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  width: min(780px, 92vw);
+  max-height: 84vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+}
+
+.log-modal-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.log-modal-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
+  font-size: 12px;
+}
+
+.log-modal-title .log-url {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+}
+
+.log-modal-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.log-modal-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 16px 0;
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.log-modal-tab {
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: 6px 6px 0 0;
+  position: relative;
+}
+
+.log-modal-tab:hover {
+  color: var(--text-primary);
+  background-color: var(--bg-hover);
+}
+
+.log-modal-tab.active {
+  color: var(--accent);
+}
+
+.log-modal-tab.active::after {
+  content: "";
+  position: absolute;
+  bottom: -1px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background-color: var(--accent);
+  border-radius: 2px;
+}
+
+.log-modal-body {
+  padding: 14px 16px 18px;
+  overflow-y: auto;
+}
+
+.log-block-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  margin: 14px 0 6px;
+}
+
+.log-block-title:first-child {
+  margin-top: 0;
+}
+
+.log-count {
+  font-weight: 500;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* Header key/value table. */
+.hdr-table {
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.hdr-row {
+  display: flex;
+  gap: 10px;
+  padding: 5px 10px;
+  font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.hdr-row:last-child {
+  border-bottom: none;
+}
+
+.hdr-row:nth-child(odd) {
+  background-color: var(--bg-primary);
+}
+
+.hdr-key {
+  color: var(--accent);
+  min-width: 190px;
+  flex-shrink: 0;
+  word-break: break-word;
+}
+
+.hdr-val {
+  color: var(--text-primary);
+  word-break: break-word;
+  flex: 1;
+}
+
+/* Overview key/value grid. */
+.kv-grid {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  gap: 8px 14px;
+  align-items: baseline;
+  font-size: 13px;
+}
+
+.kv-k {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.kv-v {
+  color: var(--text-primary);
+  min-width: 0;
+}
+
+.kv-v.mono {
+  font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
+  font-size: 12px;
+}
+
+.kv-v.breakable {
+  word-break: break-all;
+}
+
+.log-error,
+.log-error-banner {
+  color: var(--red);
+  word-break: break-word;
+}
+
+.log-error-banner {
+  background-color: var(--danger-bg);
+  border: 1px solid var(--red);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  margin-bottom: 12px;
+  font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
 }

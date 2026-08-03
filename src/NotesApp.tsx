@@ -140,6 +140,19 @@ export default function NotesApp() {
     return Array.from(map.entries()).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   }, [notes]);
 
+  // Sort: pinned first, then by updated_at desc (stable within same group)
+  const sortNotes = (list: Note[]) =>
+    [...list].sort((a, b) => {
+      if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+      return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
+    });
+
+  // Strip markdown markers for a short content preview (first line-ish, ~80 chars)
+  const previewText = (content: string): string => {
+    const t = content.replace(/[#>*_`~\-]+/g, " ").replace(/\s+/g, " ").trim();
+    return t.length > 80 ? t.slice(0, 80) + "…" : t;
+  };
+
   const filtered = useMemo(() => {
     // 1) category gate
     let list = notes;
@@ -150,11 +163,11 @@ export default function NotesApp() {
     }
     // 2) parse search: split into #tag tokens and plain text
     const raw = search.trim();
-    if (!raw) return list;
+    if (!raw) return sortNotes(list);
     const tokens = raw.split(/\s+/);
     const tagTokens = tokens.filter((t) => t.startsWith("#")).map((t) => t.slice(1).toLowerCase()).filter(Boolean);
     const textTokens = tokens.filter((t) => !t.startsWith("#")).map((t) => t.toLowerCase());
-    return list.filter((n) => {
+    return sortNotes(list.filter((n) => {
       // every tag token must match one of the note's tags
       const tagsLower = n.tags.map((t) => t.toLowerCase());
       for (const tt of tagTokens) {
@@ -163,7 +176,7 @@ export default function NotesApp() {
       if (textTokens.length === 0) return true;
       const hay = (n.title + "\n" + n.content).toLowerCase();
       return textTokens.every((tt) => hay.includes(tt));
-    });
+    }));
   }, [notes, search, selectedCategory]);
 
   const selected = useMemo(
@@ -198,6 +211,28 @@ export default function NotesApp() {
 
   // Debounced auto-save
   const saveTimer = useRef<number | null>(null);
+  const [saveState, setSaveState] = useState<"saved" | "saving" | "idle">("idle");
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // Global shortcuts: Ctrl+N new, Ctrl+F focus search, Esc clear search
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey) {
+        if (e.key.toLowerCase() === "n") { e.preventDefault(); handleNew(); }
+        else if (e.key.toLowerCase() === "f") {
+          e.preventDefault();
+          searchInputRef.current?.focus();
+          searchInputRef.current?.select();
+        }
+      } else if (e.key === "Escape" && document.activeElement === searchInputRef.current) {
+        setSearch("");
+        searchInputRef.current?.blur();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   useEffect(() => {
     if (!selected) return;
     // Skip on the very first load of a note (no diff)
@@ -210,6 +245,7 @@ export default function NotesApp() {
       return;
     }
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    setSaveState("saving");
     saveTimer.current = window.setTimeout(async () => {
       try {
         const updated = await invoke<Note | null>("update_note", {
@@ -223,9 +259,12 @@ export default function NotesApp() {
         });
         if (updated) {
           setNotes((prev) => prev.map((n) => (n.id === updated.id ? updated : n)));
+          setSaveState("saved");
+          window.setTimeout(() => setSaveState("idle"), 1500);
         }
       } catch (e) {
         console.error("update_note failed", e);
+        setSaveState("idle");
       }
     }, 400);
     return () => {
@@ -492,12 +531,19 @@ ${innerHtml}
     <div className="notes-app">
       <aside className="notes-sidebar">
         <div className="notes-toolbar">
-          <input
-            className="notes-search"
-            placeholder="Search  (use #tag)…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
+          <div className="notes-search-wrap">
+            <input
+              ref={searchInputRef}
+              className="notes-search"
+              placeholder="Search  (use #tag)…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Escape") setSearch(""); }}
+            />
+            {search && (
+              <button className="notes-search-clear" onClick={() => setSearch("")} title="Clear search (Esc)">✕</button>
+            )}
+          </div>
           <button className="notes-btn primary" onClick={handleNew} title="New note (Ctrl+N)">
             +
           </button>
@@ -581,6 +627,9 @@ ${innerHtml}
                 {n.pinned && <span className="notes-pin">📌</span>}
                 {n.title || UNTITLED}
               </div>
+              {previewText(n.content) && (
+                <div className="notes-item-preview">{previewText(n.content)}</div>
+              )}
               <div className="notes-item-meta">
                 <span>{formatDate(n.updated_at)}</span>
                 {n.tags.length > 0 && (
@@ -589,6 +638,11 @@ ${innerHtml}
               </div>
             </div>
           ))}
+        </div>
+        <div className="notes-list-status">
+          {filtered.length} note{filtered.length !== 1 ? "s" : ""}
+          {filtered.filter((n) => n.pinned).length > 0 &&
+            ` · ${filtered.filter((n) => n.pinned).length} pinned`}
         </div>
       </aside>
 
@@ -601,44 +655,56 @@ ${innerHtml}
         ) : (
           <>
             <div className="notes-editor-header">
-              <input
-                className="notes-title-input"
-                value={draftTitle}
-                placeholder={UNTITLED}
-                onChange={(e) => setDraftTitle(e.target.value)}
-              />
-              <input
-                className="cat-input"
-                list="note-cat-list"
-                value={draftCategory}
-                placeholder="Category"
-                onChange={(e) => setDraftCategory(e.target.value)}
-              />
-              <datalist id="note-cat-list">
-                {categories.map((c) => (
-                  <option key={c} value={c} />
-                ))}
-              </datalist>
-              <div className="notes-actions">
-                <button
-                  className={`notes-btn ${viewMode !== "edit" ? "active" : ""}`}
-                  onClick={() => setViewMode((v) => (v === "edit" ? "split" : v === "split" ? "preview" : "edit"))}
-                  title={`View: ${viewMode} (click to cycle)`}
-                >
-                  {viewMode === "edit" ? "Split" : viewMode === "split" ? "Preview" : "Edit"}
-                </button>
-                <button className="notes-btn" onClick={handleOpenInBrowser} title="Open rendered note in default browser">
-                  Open ↗
-                </button>
-                <button className="notes-btn" onClick={handlePin} title="Pin">
-                  {selected.pinned ? "Unpin" : "Pin"}
-                </button>
-                <button className="notes-btn" onClick={handleCopy} title="Copy content">
-                  Copy
-                </button>
-                <button className="notes-btn danger" onClick={handleDelete} title="Delete">
-                  Delete
-                </button>
+              <div className="notes-header-row">
+                <input
+                  className="notes-title-input"
+                  value={draftTitle}
+                  placeholder={UNTITLED}
+                  onChange={(e) => setDraftTitle(e.target.value)}
+                />
+                <span className={`notes-saved-hint ${saveState === "saved" ? "visible" : ""}`}>
+                  {saveState === "saving" ? "Saving…" : saveState === "saved" ? "✓ Saved" : ""}
+                </span>
+                <div className="notes-view-segmented" role="group" aria-label="View mode">
+                  {(["edit", "split", "preview"] as const).map((m) => (
+                    <button
+                      key={m}
+                      className={`notes-seg-btn ${viewMode === m ? "active" : ""}`}
+                      onClick={() => setViewMode(m)}
+                      title={`${m[0].toUpperCase()}${m.slice(1)} view`}
+                    >
+                      {m === "edit" ? "Edit" : m === "split" ? "Split" : "Preview"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="notes-header-row">
+                <input
+                  className="cat-input"
+                  list="note-cat-list"
+                  value={draftCategory}
+                  placeholder="Category"
+                  onChange={(e) => setDraftCategory(e.target.value)}
+                />
+                <datalist id="note-cat-list">
+                  {categories.map((c) => (
+                    <option key={c} value={c} />
+                  ))}
+                </datalist>
+                <div className="notes-actions">
+                  <button className="notes-btn" onClick={handleOpenInBrowser} title="Open rendered note in default browser">
+                    Open ↗
+                  </button>
+                  <button className="notes-btn" onClick={handlePin} title="Pin">
+                    {selected.pinned ? "Unpin" : "Pin"}
+                  </button>
+                  <button className="notes-btn" onClick={handleCopy} title="Copy content">
+                    Copy
+                  </button>
+                  <button className="notes-btn danger" onClick={handleDelete} title="Delete">
+                    Delete
+                  </button>
+                </div>
               </div>
             </div>
 

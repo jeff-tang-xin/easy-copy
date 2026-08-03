@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { BodyView } from "./JsonView";
 import "./App.css";
 import "./ToolsApp.css";
 
@@ -196,52 +197,84 @@ function TimestampTab() {
  * Cron Tab
  * ============================================================= */
 
-const CRON_FIELDS = ["min", "hour", "dom", "mon", "dow"];
-const CRON_FIELD_NAMES = ["Minute", "Hour", "Day of Month", "Month", "Day of Week"];
-const CRON_RANGES: [number, number][] = [
-  [0, 59],   // min
-  [0, 23],   // hour
-  [1, 31],   // dom
-  [1, 12],   // mon
-  [0, 6],    // dow (0=Sun … 6=Sat)
-];
+// Two modes: 5-field (standard Unix cron) and 6-field (with seconds, Quartz-style)
+type CronMode = "5field" | "6field";
+
+interface CronConfig {
+  fields: string[];
+  fieldNames: string[];
+  ranges: [number, number][];
+  presets: [string, string[]][];
+}
+
+const CRON_CONFIGS: Record<CronMode, CronConfig> = {
+  "5field": {
+    fields: ["min", "hour", "dom", "mon", "dow"],
+    fieldNames: ["Minute", "Hour", "Day of Month", "Month", "Day of Week"],
+    ranges: [[0, 59], [0, 23], [1, 31], [1, 12], [0, 6]],
+    presets: [
+      ["Every minute",       ["*", "*", "*", "*", "*"]],
+      ["Every 5 min",         ["*/5", "*", "*", "*", "*"]],
+      ["Every 15 min",        ["*/15", "*", "*", "*", "*"]],
+      ["Every hour",          ["0", "*", "*", "*", "*"]],
+      ["Daily 9:00",          ["0", "9", "*", "*", "*"]],
+      ["Weekdays 9:00",       ["0", "9", "*", "*", "1-5"]],
+      ["Weekly Mon 9:00",     ["0", "9", "*", "*", "1"]],
+      ["Monthly 1st 00:00",   ["0", "0", "1", "*", "*"]],
+    ],
+  },
+  "6field": {
+    fields: ["sec", "min", "hour", "dom", "mon", "dow"],
+    fieldNames: ["Second", "Minute", "Hour", "Day of Month", "Month", "Day of Week"],
+    ranges: [[0, 59], [0, 59], [0, 23], [1, 31], [1, 12], [0, 6]],
+    presets: [
+      ["Every 10 sec",       ["*/10", "*", "*", "*", "*", "*"]],
+      ["Every 30 sec",       ["*/30", "*", "*", "*", "*", "*"]],
+      ["Every sec",           ["*", "*", "*", "*", "*", "*"]],
+      ["Every 5 sec",         ["*/5", "*", "*", "*", "*", "*"]],
+      ["Daily 9:00:00",       ["0", "0", "9", "*", "*", "*"]],
+      ["Weekdays 9:00:00",    ["0", "0", "9", "*", "*", "1-5"]],
+      ["Hourly at :00:30",   ["30", "0", "*", "*", "*", "*"]],
+      ["Monthly 1st 00:00:00", ["0", "0", "0", "1", "*", "*"]],
+    ],
+  },
+};
 
 const DOW_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MON_NAMES = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-
-const CRON_PRESETS: [string, [string, string, string, string, string]][] = [
-  ["Every minute",       ["*", "*", "*", "*", "*"]],
-  ["Every 5 min",         ["*/5", "*", "*", "*", "*"]],
-  ["Every 15 min",        ["*/15", "*", "*", "*", "*"]],
-  ["Every hour",          ["0", "*", "*", "*", "*"]],
-  ["Daily 9:00",          ["0", "9", "*", "*", "*"]],
-  ["Weekdays 9:00",       ["0", "9", "*", "*", "1-5"]],
-  ["Weekly Mon 9:00",     ["0", "9", "*", "*", "1"]],
-  ["Monthly 1st 00:00",   ["0", "0", "1", "*", "*"]],
-];
 
 function parseCronField(field: string, range: [number, number]): Set<number> | null {
   const result = new Set<number>();
   const parts = field.split(",");
   for (const part of parts) {
     const trimmed = part.trim();
-    if (trimmed === "*") {
+    // "*" or "?" (Quartz no-specific-value, treated as wildcard)
+    if (trimmed === "*" || trimmed === "?") {
       for (let i = range[0]; i <= range[1]; i++) result.add(i);
       continue;
     }
-    // */n
-    const stepMatch = trimmed.match(/^\*\/(-?\d+)$/);
+    // */n  or  ?/n
+    const stepMatch = trimmed.match(/^[*?]\/(\d+)$/);
     if (stepMatch) {
       const step = parseInt(stepMatch[1], 10);
       if (step <= 0) return null;
       for (let i = range[0]; i <= range[1]; i += step) result.add(i);
       continue;
     }
+    // n/step  (e.g. "0/5" -> from n to range max, every step)
+    const baseStepMatch = trimmed.match(/^(\d+)\/(\d+)$/);
+    if (baseStepMatch) {
+      const lo = parseInt(baseStepMatch[1], 10);
+      const step = parseInt(baseStepMatch[2], 10);
+      if (step <= 0 || lo < range[0] || lo > range[1]) return null;
+      for (let i = lo; i <= range[1]; i += step) result.add(i);
+      continue;
+    }
     // n-m/step or n-m
     const rangeMatch = trimmed.match(/^(\d+)-(\d+)(?:\/(\d+))?$/);
     if (rangeMatch) {
-      let lo = parseInt(rangeMatch[1], 10);
-      let hi = parseInt(rangeMatch[2], 10);
+      const lo = parseInt(rangeMatch[1], 10);
+      const hi = parseInt(rangeMatch[2], 10);
       const step = rangeMatch[3] ? parseInt(rangeMatch[3], 10) : 1;
       if (lo < range[0] || hi > range[1] || lo > hi) return null;
       for (let i = lo; i <= hi; i += step) result.add(i);
@@ -260,19 +293,34 @@ function parseCronField(field: string, range: [number, number]): Set<number> | n
   return result.size > 0 ? result : null;
 }
 
-function describeCron(fields: string[]): string {
-  const [minS, hourS, domS, monS, dowS] = fields;
+function describeCron(fields: string[], hasSeconds: boolean): string {
+  // Treat "?" (Quartz no-specific-value) as "*" for description purposes
+  const f = fields.map((s) => (s === "?" ? "*" : s));
+  // 6-field: [sec, min, hour, dom, mon, dow]; 5-field: [min, hour, dom, mon, dow]
+  const offset = hasSeconds ? 1 : 0;
+  const secS = hasSeconds ? f[0] : undefined;
+  const [minS, hourS, domS, monS, dowS] = f.slice(offset, offset + 5);
   const parts: string[] = [];
 
+  if (secS && secS !== "0" && secS !== "*") {
+    if (secS.startsWith("*/")) {
+      parts.push(`Every ${secS.slice(2)} seconds`);
+    } else {
+      parts.push(`At second ${secS}`);
+    }
+  } else if (secS === "*") {
+    parts.push("Every second");
+  }
+
   if (minS === "*" && hourS === "*") {
-    parts.push("Every minute");
+    if (!secS || secS === "0") parts.push("Every minute");
   } else if (minS.startsWith("*/")) {
     parts.push(`Every ${minS.slice(2)} minutes`);
     if (hourS !== "*") parts.push(`at hour ${hourS}`);
   } else if (hourS === "*") {
     parts.push(`Minute ${minS} of every hour`);
   } else {
-    parts.push(`At ${pad(parseInt(hourS, 10))}:${pad(parseInt(minS, 10))}`);
+    parts.push(`At ${pad(parseInt(hourS, 10))}:${pad(parseInt(minS, 10))}${secS && secS !== "0" ? `:${pad(parseInt(secS, 10))}` : ""}`);
   }
 
   if (dowS !== "*") {
@@ -297,17 +345,60 @@ function describeCron(fields: string[]): string {
   return parts.join(" ");
 }
 
-function cronNextTimes(fields: string[], count: number): Date[] | string {
-  const sets = [
-    parseCronField(fields[0], CRON_RANGES[0]),
-    parseCronField(fields[1], CRON_RANGES[1]),
-    parseCronField(fields[2], CRON_RANGES[2]),
-    parseCronField(fields[3], CRON_RANGES[3]),
-    parseCronField(fields[4], CRON_RANGES[4]),
-  ];
+function cronNextTimes(fields: string[], count: number, hasSeconds: boolean): Date[] | string {
+  const ranges = CRON_CONFIGS[hasSeconds ? "6field" : "5field"].ranges;
+  const sets = fields.map((f, i) => parseCronField(f, ranges[i]));
   if (sets.some((s) => s === null)) return "Invalid cron expression";
-  const [mins, hours, doms, mons, dows] = sets as Set<number>[];
 
+  if (hasSeconds) {
+    const [secs, mins, hours, doms, mons, dows] = sets as Set<number>[];
+    const result: Date[] = [];
+    const start = new Date();
+    start.setMilliseconds(0);
+    start.setSeconds(start.getSeconds() + 1); // start from next second
+
+    const maxIter = 5000000; // safety limit (~58 days of seconds)
+    let iter = 0;
+    const cursor = new Date(start);
+
+    while (result.length < count && iter < maxIter) {
+      iter++;
+      if (!secs.has(cursor.getSeconds())) {
+        cursor.setSeconds(cursor.getSeconds() + 1);
+        continue;
+      }
+      if (!mins.has(cursor.getMinutes())) {
+        cursor.setMinutes(cursor.getMinutes() + 1, 0);
+        continue;
+      }
+      if (!hours.has(cursor.getHours())) {
+        cursor.setHours(cursor.getHours() + 1, 0, 0);
+        continue;
+      }
+      if (!doms.has(cursor.getDate())) {
+        cursor.setDate(cursor.getDate() + 1);
+        cursor.setHours(0, 0, 0, 0);
+        continue;
+      }
+      if (!mons.has(cursor.getMonth() + 1)) {
+        cursor.setMonth(cursor.getMonth() + 1, 1);
+        cursor.setHours(0, 0, 0, 0);
+        continue;
+      }
+      if (!dows.has(cursor.getDay())) {
+        cursor.setDate(cursor.getDate() + 1);
+        cursor.setHours(0, 0, 0, 0);
+        continue;
+      }
+      result.push(new Date(cursor));
+      cursor.setSeconds(cursor.getSeconds() + 1);
+    }
+
+    if (result.length === 0) return "No future execution found";
+    return result;
+  }
+
+  const [mins, hours, doms, mons, dows] = sets as Set<number>[];
   const result: Date[] = [];
   const start = new Date();
   start.setSeconds(0, 0);
@@ -324,7 +415,7 @@ function cronNextTimes(fields: string[], count: number): Date[] | string {
       continue;
     }
     if (!hours.has(cursor.getHours())) {
-      cursor.setMinutes(cursor.getMinutes() + 1);
+      cursor.setHours(cursor.getHours() + 1, 0, 0);
       continue;
     }
     if (!doms.has(cursor.getDate())) {
@@ -351,33 +442,55 @@ function cronNextTimes(fields: string[], count: number): Date[] | string {
 }
 
 function CronTab() {
-  const [fields, setFields] = useState<string[]>(["*/5", "*", "*", "*", "*"]);
+  const [mode, setMode] = useState<CronMode>("5field");
+  const cfg = CRON_CONFIGS[mode];
+  const [fields, setFields] = useState<string[]>(cfg.presets[0][1]);
 
   const valid = useMemo(() => {
-    return fields.every((f, i) => parseCronField(f, CRON_RANGES[i]) !== null);
-  }, [fields]);
+    return fields.length === cfg.ranges.length &&
+      fields.every((f, i) => parseCronField(f, cfg.ranges[i]) !== null);
+  }, [fields, cfg]);
 
   const description = useMemo(() => {
     if (!valid) return "Invalid expression";
-    return describeCron(fields);
-  }, [fields, valid]);
+    return describeCron(fields, mode === "6field");
+  }, [fields, valid, mode]);
 
   const nextTimes = useMemo(() => {
     if (!valid) return null;
-    return cronNextTimes(fields, 5);
-  }, [fields, valid]);
+    return cronNextTimes(fields, 5, mode === "6field");
+  }, [fields, valid, mode]);
+
+  const switchMode = (m: CronMode) => {
+    setMode(m);
+    setFields(CRON_CONFIGS[m].presets[0][1]);
+  };
 
   return (
     <div className="tools-tab-content">
       <div className="tools-section">
         <h3>Cron Expression</h3>
+        <div className="cron-mode-switch">
+          <button
+            className={`cron-mode-btn ${mode === "5field" ? "active" : ""}`}
+            onClick={() => switchMode("5field")}
+          >
+            5-Field (Standard)
+          </button>
+          <button
+            className={`cron-mode-btn ${mode === "6field" ? "active" : ""}`}
+            onClick={() => switchMode("6field")}
+          >
+            6-Field (with Seconds)
+          </button>
+        </div>
         <div className="cron-fields">
-          {CRON_FIELDS.map((f, i) => (
+          {cfg.fields.map((f, i) => (
             <div key={f} className="cron-field">
-              <label>{CRON_FIELD_NAMES[i]}</label>
+              <label>{cfg.fieldNames[i]}</label>
               <input
                 className={`tools-input cron-input ${valid ? "" : "invalid"}`}
-                value={fields[i]}
+                value={fields[i] ?? ""}
                 onChange={(e) => {
                   const next = [...fields];
                   next[i] = e.target.value;
@@ -389,7 +502,7 @@ function CronTab() {
         </div>
 
         <div className="cron-presets">
-          {CRON_PRESETS.map(([label, preset]) => (
+          {cfg.presets.map(([label, preset]) => (
             <button
               key={label}
               className="cron-preset-btn"
@@ -408,7 +521,7 @@ function CronTab() {
         </div>
         <div className="cron-expression">
           <code className="tools-code">
-            {fields[0]} {fields[1]} {fields[2]} {fields[3]} {fields[4]}
+            {fields.join(" ")}
           </code>
         </div>
       </div>
@@ -820,41 +933,35 @@ function ProxyTab({
               <button className="copy-btn" onClick={() => removeRoute(route.id)}>Remove</button>
             </div>
           ))}
-          {routes.length === 0 && <p style={{ fontSize: "13px", opacity: 0.6 }}>No rules configured</p>}
+          {routes.length === 0 && <p className="tools-hint">No rules configured</p>}
         </div>
       </div>
       <div className="tools-section">
         <h3>Request Logs</h3>
-        <p style={{ fontSize: "13px", opacity: 0.7, marginBottom: "6px" }}>
+        <p className="tools-hint" style={{ marginBottom: "6px" }}>
           Click a request to inspect full request/response details.
         </p>
-        <div style={{ maxHeight: "260px", overflowY: "auto", fontFamily: "monospace", fontSize: "12px" }}>
+        <div className="req-log-list">
           {[...requestLogs].reverse().map((log) => {
-            const statusColor =
-              log.status >= 500 ? "#e5484d" : log.status >= 400 ? "#f5a623" : "#30a46c";
+            const statusClass =
+              log.status >= 500 ? "err" : log.status >= 400 ? "warn" : log.status > 0 ? "ok" : "err";
+            const selected = selectedLog?.id === log.id;
             return (
               <div
                 key={log.id}
                 onClick={() => setSelectedLog(log)}
-                style={{
-                  padding: "4px 6px",
-                  marginBottom: "2px",
-                  cursor: "pointer",
-                  borderRadius: "4px",
-                  display: "flex",
-                  gap: "8px",
-                  alignItems: "center",
-                  background: "rgba(255,255,255,0.03)",
-                }}
+                className={`req-log-row ${selected ? "selected" : ""}`}
+                title={log.url}
               >
-                <span style={{ color: statusColor, fontWeight: 600, minWidth: "34px" }}>{log.status}</span>
-                <span style={{ minWidth: "46px", opacity: 0.8 }}>{log.method}</span>
-                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{log.url}</span>
-                <span style={{ opacity: 0.6 }}>{log.duration_ms}ms</span>
+                <span className={`log-status ${statusClass}`}>{log.status || "ERR"}</span>
+                <span className={`log-method m-${log.method.toLowerCase()}`}>{log.method}</span>
+                <span className="req-log-url">{log.url}</span>
+                {log.route_match && <span className="req-log-route">{log.route_match}</span>}
+                <span className="req-log-dur">{log.duration_ms}ms</span>
               </div>
             );
           })}
-          {requestLogs.length === 0 && <p style={{ fontSize: "13px", opacity: 0.6 }}>No requests yet</p>}
+          {requestLogs.length === 0 && <p className="tools-hint">No requests yet</p>}
         </div>
         {requestLogs.length > 0 && (
           <button
@@ -875,11 +982,11 @@ function ProxyTab({
       </div>
       <div className="tools-section">
         <h3>Activity Log</h3>
-        <div style={{ maxHeight: "120px", overflowY: "auto", fontFamily: "monospace", fontSize: "12px" }}>
+        <div className="activity-log">
           {logs.map((log, i) => (
-            <div key={i} style={{ padding: "2px 0" }}>{log}</div>
+            <div className="activity-row" key={i}>{log}</div>
           ))}
-          {logs.length === 0 && <p style={{ fontSize: "13px", opacity: 0.6 }}>No activity yet</p>}
+          {logs.length === 0 && <p className="tools-hint">No activity yet</p>}
         </div>
       </div>
 
@@ -890,8 +997,30 @@ function ProxyTab({
   );
 }
 
-/* Modal showing the full request/response JSON for a single proxy log entry. */
+/** Header table — headers are key/value pairs, so a table beats a JSON blob. */
+function HeaderTable({ rows }: { rows: [string, string][] }) {
+  if (rows.length === 0) return <div className="jv-empty">— no headers —</div>;
+  return (
+    <div className="hdr-table">
+      {rows.map(([k, v], i) => (
+        <div className="hdr-row" key={`${k}-${i}`}>
+          <span className="hdr-key">{k}</span>
+          <span className="hdr-val">{v}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+type DetailTab = "overview" | "request" | "response";
+
+/* Modal showing the full request/response detail for a single proxy log entry.
+ * Split into tabs with syntax-highlighted bodies: the previous single <pre> of
+ * JSON.stringify output rendered bodies as one-line escaped blobs, which is the
+ * one thing you actually come here to read. */
 function ProxyLogDetail({ log, onClose }: { log: ProxyLog; onClose: () => void }) {
+  const [tab, setTab] = useState<DetailTab>("overview");
+
   const detail = {
     request: {
       method: log.method,
@@ -910,51 +1039,107 @@ function ProxyLogDetail({ log, onClose }: { log: ProxyLog; onClose: () => void }
     },
   };
   const json = JSON.stringify(detail, null, 2);
+
+  const statusClass =
+    log.status >= 500 ? "err" : log.status >= 400 ? "warn" : log.status > 0 ? "ok" : "err";
+
+  // Close on ESC — a modal that only closes by mouse is a papercut.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const bodyLabel = (b: string | null) => {
+    if (b === null) return "";
+    const bytes = new TextEncoder().encode(b).length;
+    return bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`;
+  };
+
   return (
-    <div
-      onClick={onClose}
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.55)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        zIndex: 1000,
-      }}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          background: "#1c1c1e",
-          border: "1px solid rgba(255,255,255,0.15)",
-          borderRadius: "8px",
-          padding: "16px",
-          width: "min(720px, 90vw)",
-          maxHeight: "80vh",
-          overflowY: "auto",
-        }}
-      >
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
-          <h3 style={{ margin: 0 }}>
-            {log.method} {log.status} · {log.duration_ms}ms
-          </h3>
-          <div style={{ display: "flex", gap: "8px" }}>
-            <button className="copy-btn" onClick={() => navigator.clipboard.writeText(json)}>Copy JSON</button>
+    <div className="log-modal-backdrop" onClick={onClose}>
+      <div className="log-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="log-modal-head">
+          <div className="log-modal-title">
+            <span className={`log-status ${statusClass}`}>{log.status || "ERR"}</span>
+            <span className="log-method">{log.method}</span>
+            <span className="log-url" title={log.url}>{log.url}</span>
+          </div>
+          <div className="log-modal-actions">
+            <button className="copy-btn" onClick={() => navigator.clipboard.writeText(json)}>
+              Copy JSON
+            </button>
             <button className="copy-btn" onClick={onClose}>Close</button>
           </div>
         </div>
-        <pre
-          style={{
-            fontFamily: "monospace",
-            fontSize: "12px",
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-all",
-            margin: 0,
-          }}
-        >
-          {json}
-        </pre>
+
+        <div className="log-modal-tabs">
+          {(["overview", "request", "response"] as DetailTab[]).map((t) => (
+            <button
+              key={t}
+              className={`log-modal-tab ${tab === t ? "active" : ""}`}
+              onClick={() => setTab(t)}
+            >
+              {t === "overview" ? "Overview" : t === "request" ? "Request" : "Response"}
+            </button>
+          ))}
+        </div>
+
+        <div className="log-modal-body">
+          {tab === "overview" && (
+            <div className="kv-grid">
+              <div className="kv-k">Status</div>
+              <div className="kv-v">
+                <span className={`log-status ${statusClass}`}>{log.status || "ERR"}</span>
+              </div>
+              <div className="kv-k">Method</div>
+              <div className="kv-v mono">{log.method}</div>
+              <div className="kv-k">URL</div>
+              <div className="kv-v mono breakable">{log.url}</div>
+              <div className="kv-k">Route</div>
+              <div className="kv-v mono">{log.route_match ?? <span className="jv-empty">default</span>}</div>
+              <div className="kv-k">Duration</div>
+              <div className="kv-v mono">{log.duration_ms} ms</div>
+              <div className="kv-k">Time</div>
+              <div className="kv-v mono">{new Date(log.timestamp).toLocaleString()}</div>
+              {log.error && (
+                <>
+                  <div className="kv-k">Error</div>
+                  <div className="kv-v log-error">{log.error}</div>
+                </>
+              )}
+            </div>
+          )}
+
+          {tab === "request" && (
+            <>
+              <div className="log-block-title">
+                Headers <span className="log-count">{log.request_headers.length}</span>
+              </div>
+              <HeaderTable rows={log.request_headers} />
+              <div className="log-block-title">
+                Body <span className="log-count">{bodyLabel(log.request_body)}</span>
+              </div>
+              <BodyView body={log.request_body} />
+            </>
+          )}
+
+          {tab === "response" && (
+            <>
+              {log.error && <div className="log-error-banner">{log.error}</div>}
+              <div className="log-block-title">
+                Headers <span className="log-count">{log.response_headers.length}</span>
+              </div>
+              <HeaderTable rows={log.response_headers} />
+              <div className="log-block-title">
+                Body <span className="log-count">{bodyLabel(log.response_body)}</span>
+              </div>
+              <BodyView body={log.response_body} />
+            </>
+          )}
+        </div>
       </div>
     </div>
   );

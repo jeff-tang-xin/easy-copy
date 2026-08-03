@@ -31,6 +31,26 @@
   object-fit: contain;
 }
 
+/* Annotation layer sits exactly on top of the base screenshot canvas. Only this
+   one is repainted per frame, which is why dragging stays smooth. */
+.screenshot-canvas-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* Dim everything outside the selection using one huge outer box-shadow. This is
+   GPU-composited, so moving/resizing the region costs no canvas repaint at all
+   (the previous implementation re-filled full-screen bands on the canvas). */
+.sc-dim-mask {
+  position: absolute;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(59, 130, 246, 0.9);
+  pointer-events: none;
+  z-index: 3;
+}
+
 /* ===== Preview boxes (while dragging) ===== */
 
 .screenshot-rect-preview {
@@ -75,6 +95,15 @@
   outline: none;
   min-width: 180px;
   line-height: 1.3;
+  /* Textarea specifics: grow with content, wrap like the canvas renderer does,
+     and drop the native resize grip so it can't fight the sized width. */
+  resize: none;
+  overflow: hidden;
+  min-height: 2em;
+  max-height: 40vh;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
 }
 
 .text-input-field:focus {
@@ -91,6 +120,13 @@
   color: #fff;
   cursor: pointer;
   font-weight: 600;
+  /* Keep the tick centred and pinned to the top so it stays put as the
+     textarea grows to multiple lines. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: flex-start;
+  height: 32px;
 }
 
 .text-input-ok:hover {
@@ -137,6 +173,14 @@
 }
 
 .sc-tool-btn:active { transform: scale(0.92); }
+
+/* SVG icons inherit the button's colour via currentColor, so hover/active
+   states keep working exactly as they did with the old emoji glyphs. */
+.sc-tool-btn svg {
+  display: block;
+  flex: none;
+  pointer-events: none;
+}
 
 .sc-tool-btn.active {
   background: var(--accent, #3b82f6);
@@ -246,6 +290,89 @@
 }
 
 .sc-size-btn.active .sc-size-dot { background: #fff; }
+
+/* ===== Text annotation selection (click-to-edit affordance) ===== */
+
+/* Dashed outline around the text annotation currently selected with the select
+   tool. Purely visual — hit-testing happens in canvas coordinates. */
+.sc-text-selected {
+  position: absolute;
+  border: 1px dashed var(--accent, #3b82f6);
+  background: rgba(59, 130, 246, 0.10);
+  border-radius: 3px;
+  pointer-events: none;
+  z-index: 15;
+}
+
+/* Small trash affordance next to the selected text. */
+.sc-text-del {
+  position: absolute;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  color: #fff;
+  background: rgba(220, 38, 38, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 5px;
+  cursor: pointer;
+  z-index: 17;
+}
+
+.sc-text-del:hover { background: #dc2626; }
+
+/* ===== Region grips / size readout ===== */
+
+/* Inner area of the chosen region — purely a cursor affordance for "drag to
+   move". Mouse events bubble up to the canvas wrapper, which does the math. */
+.sc-region-move {
+  position: absolute;
+  cursor: move;
+  z-index: 12;
+  background: transparent;
+}
+
+/* The 8 resize grips. Centred on their anchor point via translate(-50%,-50%). */
+.sc-handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  margin: 0;
+  transform: translate(-50%, -50%);
+  background: #fff;
+  border: 2px solid var(--accent, #3b82f6);
+  border-radius: 2px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  z-index: 14;
+}
+
+.sc-handle-nw { cursor: nwse-resize; }
+.sc-handle-se { cursor: nwse-resize; }
+.sc-handle-ne { cursor: nesw-resize; }
+.sc-handle-sw { cursor: nesw-resize; }
+.sc-handle-n  { cursor: ns-resize; }
+.sc-handle-s  { cursor: ns-resize; }
+.sc-handle-e  { cursor: ew-resize; }
+.sc-handle-w  { cursor: ew-resize; }
+
+/* Live "W × H" pixel readout pinned just above the region's top-left corner. */
+.sc-dim-label {
+  position: absolute;
+  padding: 3px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: #fff;
+  background: rgba(24, 24, 37, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+  z-index: 16;
+}
 
 /* ===== Pinned (comparison) floating window ===== */
 

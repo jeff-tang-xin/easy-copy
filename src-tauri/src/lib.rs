@@ -703,9 +703,16 @@ fn start_proxy(
 
                     let mut builder = Request::builder().method(req.method()).uri(&target_url);
                     for (key, value) in req.headers() {
-                        // Skip the original Host header; it points at the proxy itself and
-                        // many backends (Vite, nginx vhosts) reject a mismatched Host.
-                        if key == axum::http::header::HOST {
+                        // Skip hop-by-hop / framing headers: the body has been fully
+                        // collected into a fixed Bytes buffer, so hyper must set the
+                        // correct Content-Length (or chunked) itself. Keeping the
+                        // original Transfer-Encoding/Content-Length makes the target
+                        // server parse a non-chunked body as chunked -> empty response
+                        // (especially for POST requests). #4
+                        if key == axum::http::header::HOST
+                            || key == axum::http::header::TRANSFER_ENCODING
+                            || key == axum::http::header::CONTENT_LENGTH
+                        {
                             continue;
                         }
                         builder = builder.header(key, value);
@@ -736,11 +743,19 @@ fn start_proxy(
                                 .collect();
 
                             // Collect response body (up to 256 KB) for logging.
-                            let (res_parts, res_body) = res.into_parts();
+                            let (mut res_parts, res_body) = res.into_parts();
                             let res_body_bytes = BodyExt::collect(res_body)
                                 .await
                                 .map(|c| c.to_bytes())
                                 .unwrap_or_default();
+
+                            // Strip hop-by-hop framing headers so hyper re-frames the
+                            // fixed buffer correctly for the client. Otherwise a chunked
+                            // upstream response is forwarded as "chunked" over a non-
+                            // chunked body, and the client sees an empty/null body. #4
+                            res_parts.headers.remove(axum::http::header::TRANSFER_ENCODING);
+                            res_parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+
                             let res_body_str = if !res_body_bytes.is_empty() {
                                 if res_body_bytes.len() <= 262144 {
                                     String::from_utf8(res_body_bytes.to_vec()).ok()
@@ -766,7 +781,7 @@ fn start_proxy(
                             );
 
                             let res = Response::from_parts(res_parts, Body::from(res_body_bytes));
-                            res.map(Body::new)
+                            res
                         }
                         Err(e) => {
                             push_log_with_details(
@@ -916,9 +931,73 @@ fn toggle_proxy_route(
 // Screenshot commands
 // ============================================================
 
-/// Capture all monitors and save to a temp PNG, then open the screenshot window.
-async fn capture_and_show(app: tauri::AppHandle) -> Result<(), String> {
+/// Geometry of the monitor a capture came from, in physical pixels.
+struct CaptureTarget {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+/// Primary monitor if the platform reports one, else the first enumerated.
+fn pick_fallback_monitor() -> xcap::XCapResult<xcap::Monitor> {
     use xcap::Monitor;
+    let monitors = Monitor::all()?;
+    let primary = monitors.iter().find(|m| m.is_primary()).cloned();
+    match primary.or_else(|| monitors.into_iter().next()) {
+        Some(m) => Ok(m),
+        None => Monitor::from_point(0, 0),
+    }
+}
+
+/// Pick the monitor the mouse cursor is currently on and capture it.
+///
+/// Multi-monitor: previously this always grabbed `Monitor::all()[0]` (the primary
+/// display), so triggering the shortcut on a secondary screen captured the wrong
+/// desktop. We resolve the monitor under the cursor instead — what every
+/// mainstream capture tool does — and fall back to primary when the cursor
+/// position is unavailable.
+fn capture_cursor_monitor(
+    app: &tauri::AppHandle,
+) -> Result<(image::RgbaImage, CaptureTarget), String> {
+    use xcap::Monitor;
+
+    let monitor = match app.cursor_position().ok() {
+        Some(p) => Monitor::from_point(p.x as i32, p.y as i32)
+            .or_else(|_| pick_fallback_monitor())
+            .map_err(|e| format!("Failed to resolve monitor: {}", e))?,
+        None => pick_fallback_monitor().map_err(|e| format!("Failed to resolve monitor: {}", e))?,
+    };
+
+    let target = CaptureTarget {
+        x: monitor.x(),
+        y: monitor.y(),
+        width: monitor.width(),
+        height: monitor.height(),
+    };
+    let image = monitor
+        .capture_image()
+        .map_err(|e| format!("Capture failed: {}", e))?;
+    Ok((image, target))
+}
+
+/// Move the overlay window onto `target`'s monitor, then make it fullscreen.
+///
+/// `set_fullscreen` expands to whichever monitor the window currently sits on, so
+/// without repositioning first the overlay would open on the primary display even
+/// when the capture came from a secondary one.
+fn place_overlay_on(w: &tauri::WebviewWindow, target: &CaptureTarget) {
+    use tauri::{PhysicalPosition, PhysicalSize};
+    // Leave fullscreen before moving: a fullscreen window ignores position changes.
+    let _ = w.set_fullscreen(false);
+    let _ = w.set_position(PhysicalPosition::new(target.x, target.y));
+    let _ = w.set_size(PhysicalSize::new(target.width, target.height));
+    let _ = w.set_fullscreen(true);
+}
+
+/// Capture the monitor under the cursor and save to a temp PNG, then open the
+/// screenshot overlay on that same monitor.
+async fn capture_and_show(app: tauri::AppHandle) -> Result<(), String> {
     use image::ImageFormat;
 
     // Hide our own windows so they are not captured in the screenshot, then give
@@ -930,10 +1009,8 @@ async fn capture_and_show(app: tauri::AppHandle) -> Result<(), String> {
     }
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
 
-    // Capture primary monitor
-    let monitors = Monitor::all().map_err(|e| format!("Failed to enumerate monitors: {}", e))?;
-    let monitor = monitors.into_iter().next().ok_or("No monitor found")?;
-    let image = monitor.capture_image().map_err(|e| format!("Capture failed: {}", e))?;
+    // Capture whichever monitor the cursor is on (not blindly the primary).
+    let (image, target) = capture_cursor_monitor(&app)?;
 
     let temp_dir = std::env::temp_dir().join("easy-copy-screenshots");
     let _ = std::fs::create_dir_all(&temp_dir);
@@ -947,11 +1024,12 @@ async fn capture_and_show(app: tauri::AppHandle) -> Result<(), String> {
     let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
     let data_url = format!("data:image/png;base64,{}", b64);
 
-    // Open screenshot window as a true borderless fullscreen overlay.
+    // Open screenshot window as a borderless fullscreen overlay on the captured
+    // monitor, so on-screen pixels line up 1:1 with the image.
     if let Some(w) = app.get_webview_window("screenshot") {
         w.emit("screenshot-captured", data_url)
             .map_err(|e| format!("Emit failed: {}", e))?;
-        let _ = w.set_fullscreen(true);
+        place_overlay_on(&w, &target);
         let _ = w.set_always_on_top(true);
         let _ = w.show();
         let _ = w.set_focus();
@@ -968,12 +1046,10 @@ async fn trigger_screenshot(app: tauri::AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn capture_screenshot(app: tauri::AppHandle) -> Result<String, String> {
-    use xcap::Monitor;
     use image::ImageFormat;
 
-    let monitors = Monitor::all().map_err(|e| format!("Failed to enumerate monitors: {}", e))?;
-    let monitor = monitors.into_iter().next().ok_or("No monitor found")?;
-    let image = monitor.capture_image().map_err(|e| format!("Capture failed: {}", e))?;
+    // Same monitor-under-cursor rule as the overlay path.
+    let (image, _target) = capture_cursor_monitor(&app)?;
 
     let temp_dir = std::env::temp_dir().join("easy-copy-screenshots");
     let _ = std::fs::create_dir_all(&temp_dir);
@@ -1025,7 +1101,7 @@ async fn copy_image_to_clipboard(data_url: String) -> Result<(), String> {
 }
 
 fn copy_image_to_clipboard_inner(data_url: String) -> Result<(), String> {
-    let _guard = crate::clipboard::CLIPBOARD_LOCK.lock().unwrap();
+    let _guard = crate::clipboard::CLIPBOARD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let b64 = if data_url.starts_with("data:image") {
         data_url.split(",").nth(1).unwrap_or(&data_url)
     } else {
@@ -1049,10 +1125,13 @@ fn copy_image_to_clipboard_inner(data_url: String) -> Result<(), String> {
 
 /// Toggle the main window visibility.
 fn toggle_window(window: &tauri::WebviewWindow) {
-    if window.is_visible().unwrap_or(false) {
+    let visible = window.is_visible().unwrap_or(false);
+    let focused = window.is_focused().unwrap_or(false);
+    if visible && focused {
         let _ = window.hide();
     } else {
         let _ = window.show();
+        let _ = window.unminimize();
         let _ = window.set_focus();
     }
 }
