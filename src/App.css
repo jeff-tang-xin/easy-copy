@@ -1140,6 +1140,24 @@ body {
   padding-top: 16px;
   border-top: 1px solid var(--border-color);
 }
+.settings-storage-row {
+  display: flex;
+  gap: 8px;
+}
+.settings-storage-row .settings-input {
+  flex: 1;
+}
+.settings-storage-row .settings-action-btn {
+  flex: 0 0 auto;
+  padding: 9px 16px;
+}
+.settings-hint {
+  display: block;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 6px;
+  line-height: 1.4;
+}
 
 /* ===== Preview Modal ===== */
 .preview-modal {

@@ -233,7 +233,9 @@ interface AppConfig {
   notes_shortcut: string;
   tools_shortcut: string;
   screenshot_shortcut: string;
+  api_shortcut: string;
   copy_on_double_click: boolean;
+  storage_root: string | null;
 }
 
 interface ContextMenuState {
@@ -325,12 +327,14 @@ function App() {
   const [config, setConfig] = useState<AppConfig>({
     max_items: 500,
     poll_interval_ms: 500,
-  clipboard_shortcut: "Ctrl+Shift+V",
-  notes_shortcut: "Ctrl+Shift+N",
-  tools_shortcut: "Ctrl+Shift+T",
-  screenshot_shortcut: "Ctrl+Shift+S",
-  copy_on_double_click: true,
-});
+    clipboard_shortcut: "Ctrl+Shift+V",
+    notes_shortcut: "Ctrl+Shift+N",
+    tools_shortcut: "Ctrl+Shift+T",
+    screenshot_shortcut: "Ctrl+Shift+S",
+    api_shortcut: "Ctrl+Shift+U",
+    copy_on_double_click: true,
+    storage_root: null,
+  });
 
   // Context menu
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
@@ -983,6 +987,19 @@ function App() {
             className="notes-btn"
             onClick={async () => {
               try {
+                await invoke("open_api_window");
+              } catch (e) {
+                showToast(`Failed: ${e}`, "error");
+              }
+            }}
+            title={`Open API (${config.api_shortcut})`}
+          >
+            <span>🌐 API</span>
+          </button>
+          <button
+            className="notes-btn"
+            onClick={async () => {
+              try {
                 await invoke("open_notes_window");
               } catch (e) {
                 showToast(`Failed: ${e}`, "error");
@@ -1305,6 +1322,44 @@ function App() {
                 value={config.screenshot_shortcut}
                 onChange={(e) => setConfig({ ...config, screenshot_shortcut: e.target.value })}
               />
+            </div>
+
+            <div className="settings-row">
+              <label className="settings-label">API Shortcut</label>
+              <input
+                className="settings-input"
+                type="text"
+                placeholder="Ctrl+Shift+U"
+                value={config.api_shortcut}
+                onChange={(e) => setConfig({ ...config, api_shortcut: e.target.value })}
+              />
+            </div>
+
+            <div className="settings-row">
+              <label className="settings-label">Storage Location</label>
+              <div className="settings-storage-row">
+                <input
+                  className="settings-input"
+                  type="text"
+                  placeholder="Default (OS app data dir)"
+                  value={config.storage_root || ""}
+                  onChange={(e) => setConfig({ ...config, storage_root: e.target.value || null })}
+                />
+                <button
+                  className="settings-action-btn"
+                  onClick={async () => {
+                    try {
+                      const sel = await invoke<string>("select_folder");
+                      if (sel) setConfig({ ...config, storage_root: sel });
+                    } catch (e) {
+                      showToast(`Folder selection failed: ${e}`, "error");
+                    }
+                  }}
+                >
+                  Browse
+                </button>
+              </div>
+              <span className="settings-hint">Where clipboard history, notes, screenshots & API collections are saved. Leave empty for default.</span>
             </div>
 
             <div className="settings-row">

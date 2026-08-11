@@ -1,7 +1,16 @@
+// Allow Tauri's #[command] macro to infer Result<T, String> for sync commands
+// across the crate (api.rs especially). Stops the `dependency_on_unit_never_type_fallback`
+// lint, which Rust 2024 will turn into a hard error in a future release.
+#![allow(dependency_on_unit_never_type_fallback)]
+
 mod clipboard;
 mod models;
 mod notes;
+mod api;
 
+use crate::api::*;
+
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clipboard::ClipboardManager;
@@ -414,6 +423,46 @@ fn open_tools_window(app: tauri::AppHandle) -> Result<(), String> {
             Ok(())
         }
         None => Err("tools window not found".to_string()),
+    }
+}
+
+/// Toggle the api window: show+focus if hidden, hide if currently visible+focused,
+/// otherwise bring it to the front.
+#[tauri::command]
+fn open_api_window(app: tauri::AppHandle) -> Result<(), String> {
+    match app.get_webview_window("api") {
+        Some(w) => {
+            let visible = w.is_visible().unwrap_or(false);
+            let focused = w.is_focused().unwrap_or(false);
+            if visible && focused {
+                let _ = w.hide();
+            } else {
+                let _ = w.show();
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+            Ok(())
+        }
+        None => Err("api window not found".to_string()),
+    }
+}
+
+/// Native folder picker for the "Storage Location" setting.
+#[tauri::command]
+fn select_folder() -> Result<Option<String>, String> {
+    match rfd::FileDialog::new().set_title("Select Storage Folder").pick_folder() {
+        Some(path) => Ok(Some(path.to_string_lossy().into_owned())),
+        None => Ok(None),
+    }
+}
+
+/// Native file picker used by the API platform for `form-data` file fields
+/// and binary/msgpack bodies. Returns the absolute path or `None` if cancelled.
+#[tauri::command]
+fn select_file() -> Result<Option<String>, String> {
+    match rfd::FileDialog::new().set_title("Select File").pick_file() {
+        Some(path) => Ok(Some(path.to_string_lossy().into_owned())),
+        None => Ok(None),
     }
 }
 
@@ -1136,6 +1185,33 @@ fn toggle_window(window: &tauri::WebviewWindow) {
     }
 }
 
+/// Resolve the data directory the app should use, honoring the user's optional
+/// `storage_root` override. Falls back to the standard Tauri-managed app data
+/// dir when no override is set. Centralised here so every manager (clipboard,
+/// notes, screenshots, tools, api) reads/writes the same location and a single
+/// settings change re-points them all.
+fn effective_data_dir(app: &tauri::AppHandle) -> PathBuf {
+    // Read the config file directly to honour the user's optional storage_root
+    // override without depending on a method that may not exist on AppConfig.
+    if let Ok(json) = std::fs::read_to_string(
+        app.path()
+            .app_config_dir()
+            .unwrap_or_else(|_| std::env::temp_dir().join("easy-copy"))
+            .join("config.json"),
+    ) {
+        if let Ok(cfg) = serde_json::from_str::<AppConfig>(&json) {
+            if let Some(custom) = cfg.storage_root {
+                let p = std::path::PathBuf::from(custom);
+                let _ = std::fs::create_dir_all(&p);
+                return p;
+            }
+        }
+    }
+    app.path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("easy-copy"))
+}
+
 /// (Re)register both global shortcuts based on current config. Unregisters all
 /// previously registered shortcuts first so `set_config` can rebind on the fly.
 fn register_shortcuts(app: &tauri::AppHandle, cfg: &AppConfig) {
@@ -1198,6 +1274,20 @@ fn register_shortcuts(app: &tauri::AppHandle, cfg: &AppConfig) {
         }
         Err(e) => eprintln!("Invalid screenshot shortcut '{}': {}", cfg.screenshot_shortcut, e),
     }
+    match cfg.api_shortcut.parse::<Shortcut>() {
+        Ok(sc) => {
+            if let Err(e) = app.global_shortcut().on_shortcut(sc, |app, _sc, event| {
+                if event.state == ShortcutState::Pressed {
+                    if let Some(w) = app.get_webview_window("api") {
+                        toggle_window(&w);
+                    }
+                }
+            }) {
+                eprintln!("Warning: failed to register api shortcut '{}': {}", cfg.api_shortcut, e);
+            }
+        }
+        Err(e) => eprintln!("Invalid api shortcut '{}': {}", cfg.api_shortcut, e),
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1209,6 +1299,18 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             None,
         ))
+        // Intercept window close requests: instead of destroying the window
+        // (which makes `get_webview_window` return None forever), hide it so
+        // the user can reopen it later. The main app stays alive via the tray.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // The main window has a tray icon; hide it instead of closing.
+                // Child windows (notes/tools/api/screenshot) must also hide,
+                // otherwise they get destroyed and cannot be reopened.
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .setup(|app| {
             let app_handle = app.handle().clone();
 
@@ -1311,7 +1413,12 @@ pub fn run() {
             }
 
             // --- Start clipboard monitoring ---
-            ClipboardManager::start_monitoring(app_handle, manager);
+            ClipboardManager::start_monitoring(app_handle.clone(), manager);
+
+            // --- API store (Postman-like HTTP client) ---
+            let api_store = Arc::new(api::ApiStore::new(Some(effective_data_dir(&app_handle))));
+            api_store.load();
+            app.manage(api_store);
 
             Ok(())
         })
@@ -1350,6 +1457,7 @@ pub fn run() {
             open_notes_window,
             open_note_preview,
             open_tools_window,
+            open_api_window,
             get_proxy_status,
             set_proxy_default_target,
             upsert_proxy_route,
@@ -1362,7 +1470,16 @@ pub fn run() {
             capture_screenshot,
             trigger_screenshot,
             save_screenshot,
-            copy_image_to_clipboard
+            copy_image_to_clipboard,
+            api_load_state,
+            api_save_node,
+            api_delete_node,
+            api_save_env,
+            api_delete_env,
+            api_set_active_env,
+            api_execute,
+            select_folder,
+            select_file
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

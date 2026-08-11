@@ -12,6 +12,23 @@ dist
 dist-ssr
 *.local
 
+# Temp build artifacts (tsc / vite / debug scripts)
+tsc-out.txt
+vite-out.txt
+*-out.txt
+tsc-check*.cjs
+check-nodes.cjs
+check-tsc.cjs
+debug-sandbox.cjs
+paren-trace.cjs
+paren-trace.txt
+run-tsc.mjs
+run-build.mjs
+build-output.txt
+check_out.txt
+test_out.txt
+test_err.txt
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
@@ -36,3 +53,4 @@ app-icon.png
 build_out.txt
 check_out.txt
 docs
+.easyClaw

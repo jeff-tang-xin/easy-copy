@@ -43,6 +43,17 @@
         "visible": false
       },
       {
+        "label": "api",
+        "title": "Easy Copy - API Platform",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 600,
+        "resizable": true,
+        "decorations": true,
+        "visible": false
+      },
+      {
         "label": "screenshot",
         "title": "Easy Copy - Screenshot",
         "width": 1920,

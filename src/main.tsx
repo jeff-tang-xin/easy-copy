@@ -9,7 +9,7 @@ const App = lazy(() => import("./App"));
 const NotesApp = lazy(() => import("./NotesApp"));
 const ToolsApp = lazy(() => import("./ToolsApp"));
 const ScreenshotApp = lazy(() => import("./ScreenshotApp"));
-
+const ApiApp = lazy(() => import("./ApiApp"));
 // Pick the root component by window label. Tauri creates each webview with its
 // own label ("main" / "notes" / "tools" / "screenshot").
 let label = "main";
@@ -19,7 +19,7 @@ try {
   // Non-Tauri context (e.g. plain `vite dev` in a browser tab) → fall back to main
 }
 
-const Root = label === "notes" ? NotesApp : label === "tools" ? ToolsApp : label === "screenshot" ? ScreenshotApp : App;
+const Root = label === "notes" ? NotesApp : label === "tools" ? ToolsApp : label === "screenshot" ? ScreenshotApp : label === "api" ? ApiApp : App;
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>

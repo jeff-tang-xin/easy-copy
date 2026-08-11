@@ -147,6 +147,7 @@ fn default_clip_sc() -> String { "Ctrl+Shift+V".into() }
 fn default_notes_sc() -> String { "Ctrl+Shift+N".into() }
 fn default_tools_sc() -> String { "Ctrl+Shift+T".into() }
 fn default_screenshot_sc() -> String { "Ctrl+Shift+S".into() }
+fn default_api_sc() -> String { "Ctrl+Shift+U".into() }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -162,8 +163,15 @@ pub struct AppConfig {
     pub tools_shortcut: String,
     #[serde(default = "default_screenshot_sc")]
     pub screenshot_shortcut: String,
+    #[serde(default = "default_api_sc")]
+    pub api_shortcut: String,
     #[serde(default = "default_true")]
     pub copy_on_double_click: bool,
+    /// Optional override for the directory where all persistent data is stored
+    /// (clipboard history, notes, screenshots, tools state, API collections, ...).
+    /// When `None`, the OS-default app data directory is used.
+    #[serde(default)]
+    pub storage_root: Option<String>,
 }
 
 fn default_true() -> bool { true }
@@ -181,6 +189,8 @@ impl Default for AppConfig {
             tools_shortcut: default_tools_sc(),
             screenshot_shortcut: default_screenshot_sc(),
             copy_on_double_click: true,
+            storage_root: None,
+            api_shortcut: default_api_sc(),
         }
     }
 }
@@ -230,4 +240,138 @@ pub struct ProxyLog {
     /// Error detail when the forward failed (connection refused, timeout, ...).
     #[serde(default)]
     pub error: Option<String>,
+}
+
+// ── API Platform ───────────────────────────────────────────────
+
+/// Node type in the API collection tree.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ApiNodeType {
+    Folder,
+    Request,
+}
+
+/// A single node in the API collection tree (folder or request).
+/// The tree is stored as a flat `Vec<ApiNode>`; hierarchy is reconstructed
+/// via `parent_id` (`None` = root).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiNode {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub name: String,
+    pub node_type: ApiNodeType,
+    /// Only present when `node_type == Request`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<ApiRequest>,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub updated_at: i64,
+}
+
+/// HTTP request stored under a request node.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ApiRequest {
+    #[serde(default)]
+    pub method: String,
+    #[serde(default)]
+    pub url: String,
+    /// Headers as (name, value) pairs (matches `ProxyLog` shape).
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
+    /// Query parameters appended to the URL at send time.
+    #[serde(default)]
+    pub query: Vec<(String, String)>,
+    /// Path variables (`:var` in URL) replaced at send time.
+    #[serde(default)]
+    pub path_vars: Vec<(String, String)>,
+    /// Body type: "none", "raw", "form-data", "urlencoded", "binary", "msgpack".
+    #[serde(default)]
+    pub body_type: String,
+    /// Raw body language (used when body_type == "raw"): "json", "xml", "javascript", "text", "html".
+    #[serde(default)]
+    pub body_raw_lang: String,
+    /// Optional request body (text, used when body_type == "raw").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// Form data fields (used when body_type == "form-data").
+    #[serde(default)]
+    pub form_data: Vec<FormField>,
+    /// URL-encoded fields (used when body_type == "urlencoded").
+    #[serde(default)]
+    pub url_encoded: Vec<(String, String)>,
+    /// File path for binary body (used when body_type == "binary").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary_file: Option<String>,
+    /// File path for msgpack body (used when body_type == "msgpack").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub msgpack_file: Option<String>,
+    /// Optional environment id used to expand `{{var}}` placeholders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_id: Option<String>,
+    /// Most recent N (50) responses — newest first, capped via `history_limit`.
+    #[serde(default)]
+    pub history: Vec<ApiResponse>,
+}
+
+/// A single field in a form-data body (text or file).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FormField {
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub value: String,
+    /// "text" or "file".
+    #[serde(default, rename = "type")]
+    pub field_type: String,
+    /// File path (when field_type == "file").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
+    /// File name override (optional).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_name: Option<String>,
+}
+
+/// Captured HTTP response, persisted under `ApiRequest::history`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiResponse {
+    pub status: u16,
+    pub status_text: String,
+    /// Response headers as (name, value) pairs.
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
+    /// Actual request headers sent (after env expansion + auto-added).
+    #[serde(default)]
+    pub request_headers: Vec<(String, String)>,
+    /// Response body as UTF-8 text (truncated for large/binary payloads).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    pub duration_ms: u64,
+    pub timestamp: i64,
+    /// Error detail when the request failed (DNS, TLS, timeout, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Named environment holding a flat set of `{{var}}` substitutions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiEnvironment {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub vars: Vec<(String, String)>,
+}
+
+/// Persistence container for the API platform — serialized to a single
+/// JSON file at `<storage_root>/api_collections.json`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ApiState {
+    #[serde(default)]
+    pub nodes: Vec<ApiNode>,
+    #[serde(default)]
+    pub envs: Vec<ApiEnvironment>,
+    /// Currently active environment id (`None` = no env expansion).
+    #[serde(default)]
+    pub active_env_id: Option<String>,
 }
