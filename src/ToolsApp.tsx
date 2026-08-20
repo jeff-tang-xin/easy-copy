@@ -2,57 +2,12 @@ import { useState, useMemo, useEffect } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { useTheme } from "./hooks/useTheme";
+import { useToast } from "./hooks/useToast";
+import { friendlyError } from "./hooks/friendlyError";
 import { BodyView } from "./JsonView";
 import "./App.css";
 import "./ToolsApp.css";
-
-/* =============================================================
- * Theme hook (shared with App.tsx / NotesApp.tsx pattern)
- * Reads "easy-copy-theme" from localStorage, syncs across windows
- * via storage + focus events, sets html[data-theme] attribute.
- * ============================================================= */
-
-function useTheme() {
-  const [themeMode, setThemeMode] = useState<"auto" | "light" | "dark">(
-    () =>
-      (localStorage.getItem("easy-copy-theme") as any) ||
-      (localStorage.getItem("theme") as any) ||
-      "auto"
-  );
-  const [systemDark, setSystemDark] = useState(
-    () => window.matchMedia("(prefers-color-scheme: dark)").matches
-  );
-  const theme = themeMode === "auto" ? (systemDark ? "dark" : "light") : themeMode;
-
-  useEffect(() => {
-    const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    const fn = (e: MediaQueryListEvent) => setSystemDark(e.matches);
-    mq.addEventListener("change", fn);
-    return () => mq.removeEventListener("change", fn);
-  }, []);
-
-  useEffect(() => {
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === "easy-copy-theme" && e.newValue) {
-        setThemeMode(e.newValue as any);
-      }
-    };
-    window.addEventListener("storage", onStorage);
-    const onFocus = () => {
-      const cur = localStorage.getItem("easy-copy-theme");
-      if (cur && cur !== themeMode) setThemeMode(cur as any);
-    };
-    window.addEventListener("focus", onFocus);
-    return () => {
-      window.removeEventListener("storage", onStorage);
-      window.removeEventListener("focus", onFocus);
-    };
-  }, [themeMode]);
-
-  useEffect(() => {
-    document.documentElement.setAttribute("data-theme", theme);
-  }, [theme]);
-}
 
 /* =============================================================
  * Timestamp Tab
@@ -66,6 +21,10 @@ function TimestampTab() {
   const [now, setNow] = useState(Date.now());
   const [epochInput, setEpochInput] = useState("");
   const [dateInput, setDateInput] = useState("");
+  // Shared toast hook — replaces a hand-rolled setTimeout+state pair so every
+  // tool (Timestamp/Regex/Ip/Proxy) uses the same success/error styling and
+  // the same de-dup behaviour.
+  const { toast, showToast } = useToast();
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
@@ -77,16 +36,16 @@ function TimestampTab() {
   const epochResult = useMemo(() => {
     if (!epochInput.trim()) return null;
     const n = Number(epochInput.trim());
-    if (isNaN(n)) return { error: "Invalid number" };
+    if (isNaN(n)) return { error: "请输入有效数字" };
     // Auto-detect seconds vs milliseconds
     const ms = n < 1e12 ? n * 1000 : n;
     const d = new Date(ms);
-    if (isNaN(d.getTime())) return { error: "Invalid date" };
+    if (isNaN(d.getTime())) return { error: "无法解析为有效日期" };
     return {
       iso: d.toISOString(),
       local: d.toLocaleString(),
       utc: d.toUTCString(),
-      relative: d.getTime() > Date.now() ? "future" : "past",
+      relative: d.getTime() > Date.now() ? "未来" : "过去",
       ms: ms,
     };
   }, [epochInput]);
@@ -94,7 +53,7 @@ function TimestampTab() {
   const dateResult = useMemo(() => {
     if (!dateInput.trim()) return null;
     const d = new Date(dateInput.trim());
-    if (isNaN(d.getTime())) return { error: "Invalid date" };
+    if (isNaN(d.getTime())) return { error: "无法解析为有效日期" };
     return {
       seconds: Math.floor(d.getTime() / 1000),
       milliseconds: d.getTime(),
@@ -102,42 +61,47 @@ function TimestampTab() {
     };
   }, [dateInput]);
 
-  const copy = (text: string, _label: string) => {
-    navigator.clipboard.writeText(text);
+  const copy = async (text: string, _label: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast("已复制");
+    } catch (e) {
+      showToast(friendlyError(e, "复制失败"), "error");
+    }
   };
 
   return (
     <div className="tools-tab-content">
       <div className="tools-section">
-        <h3>Current Time</h3>
+        <h3>当前时间</h3>
         <div className="tools-output-group">
           <div className="tools-output-row">
-            <span className="tools-label">Unix (s)</span>
+            <span className="tools-label">Unix（秒）</span>
             <code className="tools-code">{Math.floor(now / 1000)}</code>
-            <button className="copy-btn" onClick={() => copy(String(Math.floor(now / 1000)), "epoch")}>Copy</button>
+            <button className="copy-btn" onClick={() => copy(String(Math.floor(now / 1000)), "epoch")}>复制</button>
           </div>
           <div className="tools-output-row">
-            <span className="tools-label">Unix (ms)</span>
+            <span className="tools-label">Unix（毫秒）</span>
             <code className="tools-code">{now}</code>
-            <button className="copy-btn" onClick={() => copy(String(now), "epoch")}>Copy</button>
+            <button className="copy-btn" onClick={() => copy(String(now), "epoch")}>复制</button>
           </div>
           <div className="tools-output-row">
             <span className="tools-label">ISO 8601</span>
             <code className="tools-code">{nowDate.toISOString()}</code>
-            <button className="copy-btn" onClick={() => copy(nowDate.toISOString(), "iso")}>Copy</button>
+            <button className="copy-btn" onClick={() => copy(nowDate.toISOString(), "iso")}>复制</button>
           </div>
           <div className="tools-output-row">
-            <span className="tools-label">Local</span>
+            <span className="tools-label">本地时间</span>
             <code className="tools-code">{nowDate.toLocaleString()}</code>
           </div>
         </div>
       </div>
 
       <div className="tools-section">
-        <h3>Epoch → Date</h3>
+        <h3>时间戳 → 日期</h3>
         <input
           className="tools-input"
-          placeholder="Enter Unix timestamp (s or ms)…"
+          placeholder="输入 Unix 时间戳（秒或毫秒）…"
           value={epochInput}
           onChange={(e) => setEpochInput(e.target.value)}
         />
@@ -146,10 +110,10 @@ function TimestampTab() {
             <div className="tools-output-row">
               <span className="tools-label">ISO</span>
               <code className="tools-code">{epochResult.iso}</code>
-              <button className="copy-btn" onClick={() => copy(epochResult.iso!, "iso")}>Copy</button>
+              <button className="copy-btn" onClick={() => copy(epochResult.iso!, "iso")}>复制</button>
             </div>
             <div className="tools-output-row">
-              <span className="tools-label">Local</span>
+              <span className="tools-label">本地</span>
               <code className="tools-code">{epochResult.local}</code>
             </div>
             <div className="tools-output-row">
@@ -162,24 +126,24 @@ function TimestampTab() {
       </div>
 
       <div className="tools-section">
-        <h3>Date → Epoch</h3>
+        <h3>日期 → 时间戳</h3>
         <input
           className="tools-input"
-          placeholder="e.g. 2024-01-15T10:30:00Z  or  2024/01/15 10:30:00"
+          placeholder="例如 2024-01-15T10:30:00Z 或 2024/01/15 10:30:00"
           value={dateInput}
           onChange={(e) => setDateInput(e.target.value)}
         />
         {dateResult && !dateResult.error && (
           <div className="tools-output-group">
             <div className="tools-output-row">
-              <span className="tools-label">Seconds</span>
+              <span className="tools-label">秒</span>
               <code className="tools-code">{dateResult.seconds}</code>
-              <button className="copy-btn" onClick={() => copy(String(dateResult.seconds), "epoch")}>Copy</button>
+              <button className="copy-btn" onClick={() => copy(String(dateResult.seconds), "epoch")}>复制</button>
             </div>
             <div className="tools-output-row">
-              <span className="tools-label">Millis</span>
+              <span className="tools-label">毫秒</span>
               <code className="tools-code">{dateResult.milliseconds}</code>
-              <button className="copy-btn" onClick={() => copy(String(dateResult.milliseconds), "epoch")}>Copy</button>
+              <button className="copy-btn" onClick={() => copy(String(dateResult.milliseconds), "epoch")}>复制</button>
             </div>
             <div className="tools-output-row">
               <span className="tools-label">ISO</span>
@@ -189,6 +153,8 @@ function TimestampTab() {
         )}
         {dateResult?.error && <p className="tools-error">{dateResult.error}</p>}
       </div>
+
+      {toast && <div className={`tools-toast tools-toast-${toast.type}`}>{toast.msg}</div>}
     </div>
   );
 }
@@ -210,38 +176,38 @@ interface CronConfig {
 const CRON_CONFIGS: Record<CronMode, CronConfig> = {
   "5field": {
     fields: ["min", "hour", "dom", "mon", "dow"],
-    fieldNames: ["Minute", "Hour", "Day of Month", "Month", "Day of Week"],
+    fieldNames: ["分钟", "小时", "日", "月", "星期"],
     ranges: [[0, 59], [0, 23], [1, 31], [1, 12], [0, 6]],
     presets: [
-      ["Every minute",       ["*", "*", "*", "*", "*"]],
-      ["Every 5 min",         ["*/5", "*", "*", "*", "*"]],
-      ["Every 15 min",        ["*/15", "*", "*", "*", "*"]],
-      ["Every hour",          ["0", "*", "*", "*", "*"]],
-      ["Daily 9:00",          ["0", "9", "*", "*", "*"]],
-      ["Weekdays 9:00",       ["0", "9", "*", "*", "1-5"]],
-      ["Weekly Mon 9:00",     ["0", "9", "*", "*", "1"]],
-      ["Monthly 1st 00:00",   ["0", "0", "1", "*", "*"]],
+      ["每分钟",       ["*", "*", "*", "*", "*"]],
+      ["每 5 分钟",     ["*/5", "*", "*", "*", "*"]],
+      ["每 15 分钟",    ["*/15", "*", "*", "*", "*"]],
+      ["每小时",        ["0", "*", "*", "*", "*"]],
+      ["每天 9:00",     ["0", "9", "*", "*", "*"]],
+      ["工作日 9:00",   ["0", "9", "*", "*", "1-5"]],
+      ["每周一 9:00",   ["0", "9", "*", "*", "1"]],
+      ["每月 1 日 00:00", ["0", "0", "1", "*", "*"]],
     ],
   },
   "6field": {
     fields: ["sec", "min", "hour", "dom", "mon", "dow"],
-    fieldNames: ["Second", "Minute", "Hour", "Day of Month", "Month", "Day of Week"],
+    fieldNames: ["秒", "分钟", "小时", "日", "月", "星期"],
     ranges: [[0, 59], [0, 59], [0, 23], [1, 31], [1, 12], [0, 6]],
     presets: [
-      ["Every 10 sec",       ["*/10", "*", "*", "*", "*", "*"]],
-      ["Every 30 sec",       ["*/30", "*", "*", "*", "*", "*"]],
-      ["Every sec",           ["*", "*", "*", "*", "*", "*"]],
-      ["Every 5 sec",         ["*/5", "*", "*", "*", "*", "*"]],
-      ["Daily 9:00:00",       ["0", "0", "9", "*", "*", "*"]],
-      ["Weekdays 9:00:00",    ["0", "0", "9", "*", "*", "1-5"]],
-      ["Hourly at :00:30",   ["30", "0", "*", "*", "*", "*"]],
-      ["Monthly 1st 00:00:00", ["0", "0", "0", "1", "*", "*"]],
+      ["每 10 秒",     ["*/10", "*", "*", "*", "*", "*"]],
+      ["每 30 秒",     ["*/30", "*", "*", "*", "*", "*"]],
+      ["每秒",         ["*", "*", "*", "*", "*", "*"]],
+      ["每 5 秒",      ["*/5", "*", "*", "*", "*", "*"]],
+      ["每天 9:00:00", ["0", "0", "9", "*", "*", "*"]],
+      ["工作日 9:00:00", ["0", "0", "9", "*", "*", "1-5"]],
+      ["每小时 :00:30", ["30", "0", "*", "*", "*", "*"]],
+      ["每月 1 日 00:00:00", ["0", "0", "0", "1", "*", "*"]],
     ],
   },
 };
 
-const DOW_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const MON_NAMES = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const DOW_NAMES = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+const MON_NAMES = ["", "1 月", "2 月", "3 月", "4 月", "5 月", "6 月", "7 月", "8 月", "9 月", "10 月", "11 月", "12 月"];
 
 function parseCronField(field: string, range: [number, number]): Set<number> | null {
   const result = new Set<number>();
@@ -304,51 +270,51 @@ function describeCron(fields: string[], hasSeconds: boolean): string {
 
   if (secS && secS !== "0" && secS !== "*") {
     if (secS.startsWith("*/")) {
-      parts.push(`Every ${secS.slice(2)} seconds`);
+      parts.push(`每 ${secS.slice(2)} 秒`);
     } else {
-      parts.push(`At second ${secS}`);
+      parts.push(`在第 ${secS} 秒`);
     }
   } else if (secS === "*") {
-    parts.push("Every second");
+    parts.push("每秒");
   }
 
   if (minS === "*" && hourS === "*") {
-    if (!secS || secS === "0") parts.push("Every minute");
+    if (!secS || secS === "0") parts.push("每分钟");
   } else if (minS.startsWith("*/")) {
-    parts.push(`Every ${minS.slice(2)} minutes`);
-    if (hourS !== "*") parts.push(`at hour ${hourS}`);
+    parts.push(`每 ${minS.slice(2)} 分钟`);
+    if (hourS !== "*") parts.push(`在 ${hourS} 时`);
   } else if (hourS === "*") {
-    parts.push(`Minute ${minS} of every hour`);
+    parts.push(`每小时的第 ${minS} 分`);
   } else {
-    parts.push(`At ${pad(parseInt(hourS, 10))}:${pad(parseInt(minS, 10))}${secS && secS !== "0" ? `:${pad(parseInt(secS, 10))}` : ""}`);
+    parts.push(`在 ${pad(parseInt(hourS, 10))}:${pad(parseInt(minS, 10))}${secS && secS !== "0" ? `:${pad(parseInt(secS, 10))}` : ""}`);
   }
 
   if (dowS !== "*") {
-    if (dowS === "1-5") parts.push("on weekdays (Mon–Fri)");
-    else if (dowS === "0,6") parts.push("on weekends (Sat–Sun)");
+    if (dowS === "1-5") parts.push("（周一至周五）");
+    else if (dowS === "0,6") parts.push("（周六、周日）");
     else {
-      const days = Array.from(parseCronField(dowS, [0, 6]) ?? []).map((d) => DOW_NAMES[d]).join(", ");
-      parts.push(`on ${days}`);
+      const days = Array.from(parseCronField(dowS, [0, 6]) ?? []).map((d) => DOW_NAMES[d]).join("、");
+      parts.push(`${days}`);
     }
   }
 
   if (domS !== "*" && monS !== "*") {
-    const mons = Array.from(parseCronField(monS, [1, 12]) ?? []).map((m) => MON_NAMES[m]).join(", ");
-    parts.push(`on day ${domS} of ${mons}`);
+    const mons = Array.from(parseCronField(monS, [1, 12]) ?? []).map((m) => MON_NAMES[m]).join("、");
+    parts.push(`${mons} ${domS} 日`);
   } else if (domS !== "*") {
-    parts.push(`on day ${domS} of every month`);
+    parts.push(`每月 ${domS} 日`);
   } else if (monS !== "*") {
-    const mons = Array.from(parseCronField(monS, [1, 12]) ?? []).map((m) => MON_NAMES[m]).join(", ");
-    parts.push(`in ${mons}`);
+    const mons = Array.from(parseCronField(monS, [1, 12]) ?? []).map((m) => MON_NAMES[m]).join("、");
+    parts.push(`${mons}`);
   }
 
-  return parts.join(" ");
+  return parts.join("，");
 }
 
 function cronNextTimes(fields: string[], count: number, hasSeconds: boolean): Date[] | string {
   const ranges = CRON_CONFIGS[hasSeconds ? "6field" : "5field"].ranges;
   const sets = fields.map((f, i) => parseCronField(f, ranges[i]));
-  if (sets.some((s) => s === null)) return "Invalid cron expression";
+  if (sets.some((s) => s === null)) return "Cron 表达式无效";
 
   if (hasSeconds) {
     const [secs, mins, hours, doms, mons, dows] = sets as Set<number>[];
@@ -394,7 +360,7 @@ function cronNextTimes(fields: string[], count: number, hasSeconds: boolean): Da
       cursor.setSeconds(cursor.getSeconds() + 1);
     }
 
-    if (result.length === 0) return "No future execution found";
+    if (result.length === 0) return "未找到未来执行时间";
     return result;
   }
 
@@ -437,7 +403,7 @@ function cronNextTimes(fields: string[], count: number, hasSeconds: boolean): Da
     cursor.setMinutes(cursor.getMinutes() + 1);
   }
 
-  if (result.length === 0) return "No future execution found";
+  if (result.length === 0) return "未找到未来执行时间";
   return result;
 }
 
@@ -447,12 +413,13 @@ function CronTab() {
   const [fields, setFields] = useState<string[]>(cfg.presets[0][1]);
 
   const valid = useMemo(() => {
-    return fields.length === cfg.ranges.length &&
-      fields.every((f, i) => parseCronField(f, cfg.ranges[i]) !== null);
-  }, [fields, cfg]);
+    const ranges = CRON_CONFIGS[mode].ranges;
+    if (fields.length !== ranges.length) return false;
+    return fields.every((f, i) => parseCronField(f, ranges[i]) !== null);
+  }, [fields, mode]);
 
   const description = useMemo(() => {
-    if (!valid) return "Invalid expression";
+    if (!valid) return "表达式无效";
     return describeCron(fields, mode === "6field");
   }, [fields, valid, mode]);
 
@@ -469,19 +436,19 @@ function CronTab() {
   return (
     <div className="tools-tab-content">
       <div className="tools-section">
-        <h3>Cron Expression</h3>
+        <h3>Cron 表达式</h3>
         <div className="cron-mode-switch">
           <button
             className={`cron-mode-btn ${mode === "5field" ? "active" : ""}`}
             onClick={() => switchMode("5field")}
           >
-            5-Field (Standard)
+            5 字段（标准）
           </button>
           <button
             className={`cron-mode-btn ${mode === "6field" ? "active" : ""}`}
             onClick={() => switchMode("6field")}
           >
-            6-Field (with Seconds)
+            6 字段（含秒）
           </button>
         </div>
         <div className="cron-fields">
@@ -515,7 +482,7 @@ function CronTab() {
       </div>
 
       <div className="tools-section">
-        <h3>Description</h3>
+        <h3>说明</h3>
         <div className="cron-description">
           {valid ? "✅ " : "❌ "}{description}
         </div>
@@ -527,7 +494,7 @@ function CronTab() {
       </div>
 
       <div className="tools-section">
-        <h3>Next 5 Executions</h3>
+        <h3>未来 5 次执行</h3>
         {nextTimes && typeof nextTimes === "string" && (
           <p className="tools-error">{nextTimes}</p>
         )}
@@ -552,12 +519,12 @@ function CronTab() {
  * ============================================================= */
 
 const REGEX_PRESETS: [string, string, string][] = [
-  ["Email",      "^[\\w.+-]+@[\\w.-]+\\.[a-zA-Z]{2,}$", "gim"],
+  ["邮箱",      "^[\\w.+-]+@[\\w.-]+\\.[a-zA-Z]{2,}$", "gim"],
   ["URL",        "https?://[\\w.-]+(?:/[\\w./?=-]*)?", "gm"],
-  ["IPv4",       "\\b(?:\d{1,3}\.){3}\d{1,3}\\b", "g"],
-  ["Phone",      "\\b\d{3}[-.]?\d{3}[-.]?\d{4}\\b", "g"],
-  ["Date ISO",   "\\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", "g"],
-  ["Hex Color",  "#[0-9a-fA-F]{6}\\b", "g"],
+  ["IPv4",       "\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b", "g"],
+  ["手机号",     "\\b1[3-9]\\d{9}\\b", "g"],
+  ["ISO 日期",   "\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}", "g"],
+  ["十六进制颜色", "#[0-9a-fA-F]{6}\\b", "g"],
 ];
 
 interface MatchInfo {
@@ -569,7 +536,10 @@ interface MatchInfo {
 function RegexTab() {
   const [pattern, setPattern] = useState("\\b\\w+@\\w+\\.\\w+\\b");
   const [flags, setFlags] = useState("g");
-  const [testStr, setTestStr] = useState("Contact: alice@example.com or bob@test.org for info.\nAlso reach admin@site.co.uk");
+  const [testStr, setTestStr] = useState("联系我们：alice@example.com 或 bob@test.org。\n也可联系 admin@site.co.uk");
+  // Same shared toast as the other tools — keeps a single CSS class in use and
+  // gives us structured success/error tinting.
+  const { toast } = useToast();
 
   const { error, matches, highlighted } = useMemo(() => {
     if (!pattern) return { error: null, matches: [], highlighted: testStr };
@@ -577,7 +547,9 @@ function RegexTab() {
     try {
       regex = new RegExp(pattern, flags);
     } catch (e) {
-      return { error: String(e).replace(/\n.*/s, ""), matches: [], highlighted: testStr };
+      // Surface a short, readable message — the JS error contains a long
+      // stack trace we don't want in the UI.
+      return { error: `正则表达式无效：${friendlyError(e, "正则语法错误")}`, matches: [], highlighted: testStr };
     }
 
     if (!flags.includes("g")) {
@@ -621,25 +593,26 @@ function RegexTab() {
   return (
     <div className="tools-tab-content">
       <div className="tools-section">
-        <h3>Pattern</h3>
+        <h3>正则表达式</h3>
         <div className="regex-input-row">
           <span className="regex-slash">/</span>
           <input
             className="tools-input regex-pattern-input"
             value={pattern}
             onChange={(e) => setPattern(e.target.value)}
-            placeholder="Enter regex pattern…"
+            placeholder="输入正则表达式…"
           />
           <span className="regex-slash">/</span>
           <input
             className="tools-input regex-flags-input"
             value={flags}
             onChange={(e) => setFlags(e.target.value.replace(/[^gimsuy]/g, ""))}
-            placeholder="flags"
+            placeholder="标志"
+            title="g=全局 i=忽略大小写 m=多行 s=.匹配换行 u=Unicode y=粘性"
           />
         </div>
         <div className="regex-flags-hint">
-          g=global · i=case-insensitive · m=multiline · s=. matches newline · u=unicode · y=sticky
+          g=全局 · i=忽略大小写 · m=多行 · s=点号匹配换行 · u=Unicode · y=粘性
         </div>
         {error && <p className="tools-error">{error}</p>}
 
@@ -660,7 +633,7 @@ function RegexTab() {
       </div>
 
       <div className="tools-section">
-        <h3>Test String</h3>
+        <h3>测试字符串</h3>
         <textarea
           className="tools-textarea"
           value={testStr}
@@ -671,9 +644,9 @@ function RegexTab() {
       </div>
 
       <div className="tools-section">
-        <h3>Matches ({matches.length})</h3>
+        <h3>匹配结果（{matches.length}）</h3>
         {matches.length === 0 && !error && (
-          <p className="tools-hint">No matches found.</p>
+          <p className="tools-hint">未找到匹配。</p>
         )}
         {matches.length > 0 && (
           <div className="regex-match-list">
@@ -682,13 +655,13 @@ function RegexTab() {
                 <div className="regex-match-header">
                   <span className="tools-label">#{i + 1}</span>
                   <code className="tools-code">"{m.matched}"</code>
-                  <span className="tools-sub">at index {m.index}</span>
+                  <span className="tools-sub">位置 {m.index}</span>
                 </div>
                 {m.groups.length > 0 && (
                   <div className="regex-groups">
                     {m.groups.map((g, gi) => (
                       <span key={gi} className="regex-group">
-                        ${gi + 1}: "{g}"
+                        ${gi + 1}："{g}"
                       </span>
                     ))}
                   </div>
@@ -700,12 +673,14 @@ function RegexTab() {
       </div>
 
       <div className="tools-section">
-        <h3>Highlighted</h3>
+        <h3>高亮预览</h3>
         <pre
           className="regex-highlighted"
           dangerouslySetInnerHTML={{ __html: highlighted || escapeHtml(testStr) }}
         />
       </div>
+
+      {toast && <div className={`tools-toast tools-toast-${toast.type}`}>{toast.msg}</div>}
     </div>
   );
 }
@@ -813,25 +788,34 @@ function ProxyTab({
   }, []);
 
   // Poll proxy logs every 2 seconds so new entries appear automatically.
+  // Skipped when the tab is hidden so the app doesn't keep invoking IPC in
+  // the background — once the user comes back the next tick re-syncs.
   useEffect(() => {
-    const interval = setInterval(async () => {
-      try {
-        const logs = await invoke<ProxyLog[]>("get_proxy_logs");
-        setState((s) => ({ ...s, requestLogs: logs }));
-      } catch {
-        // silent
+    let cancelled = false;
+    const tick = async () => {
+      if (document.visibilityState === "visible") {
+        try {
+          const logs = await invoke<ProxyLog[]>("get_proxy_logs");
+          if (!cancelled) setState((s) => ({ ...s, requestLogs: logs }));
+        } catch {
+          // silent
+        }
       }
-    }, 2000);
-    return () => clearInterval(interval);
+    };
+    const interval = setInterval(tick, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
   }, []);
 
   const toggleServer = async () => {
     try {
       await invoke(isRunning ? "stop_proxy" : "start_proxy", { port });
       setState((s) => ({ ...s, isRunning: !isRunning }));
-      pushLog(`Proxy ${isRunning ? "stopped" : "started"} on port ${port}`);
+      pushLog(`代理已${isRunning ? "停止" : "启动"}，端口 ${port}`);
     } catch (e) {
-      pushLog(`Error: ${String(e)}`);
+      pushLog(`错误：${friendlyError(e, "操作失败")}`);
     }
   };
 
@@ -839,7 +823,7 @@ function ProxyTab({
     try {
       await invoke("set_proxy_default_target", { target });
     } catch (e) {
-      pushLog(`Error saving default target: ${String(e)}`);
+      pushLog(`保存默认目标失败：${friendlyError(e, "保存失败")}`);
     }
   };
 
@@ -858,9 +842,9 @@ function ProxyTab({
       setState((s) => ({ ...s, routes: [...s.routes, route] }));
       setNewPrefix("");
       setNewTarget("");
-      pushLog(`Rule added: ${prefix} → ${target}`);
+      pushLog(`已添加规则：${prefix} → ${target}`);
     } catch (e) {
-      pushLog(`Error adding rule: ${String(e)}`);
+      pushLog(`添加规则失败：${friendlyError(e, "添加失败")}`);
     }
   };
 
@@ -869,7 +853,7 @@ function ProxyTab({
       await invoke("delete_proxy_route", { routeId: id });
       setState((s) => ({ ...s, routes: s.routes.filter((r) => r.id !== id) }));
     } catch (e) {
-      pushLog(`Error removing rule: ${String(e)}`);
+      pushLog(`删除规则失败：${friendlyError(e, "删除失败")}`);
     }
   };
 
@@ -881,31 +865,31 @@ function ProxyTab({
         routes: s.routes.map((r) => (r.id === id ? { ...r, enabled: !r.enabled } : r)),
       }));
     } catch (e) {
-      pushLog(`Error toggling rule: ${String(e)}`);
+      pushLog(`切换规则失败：${friendlyError(e, "切换失败")}`);
     }
   };
 
   return (
     <div className="tools-tab-content">
       <div className="tools-section">
-        <h3>Proxy Server</h3>
+        <h3>代理服务器</h3>
         <div className="ip-query-row">
           <input
             className="tools-input"
             type="number"
-            placeholder="Port"
+            placeholder="端口"
             value={port}
             disabled={isRunning}
             onChange={(e) => setState((s) => ({ ...s, port: Number(e.target.value) }))}
           />
-          <button className={isRunning ? "stop-btn" : "start-btn"} onClick={toggleServer}>{isRunning ? "Stop Proxy" : "Start Proxy"}</button>
+          <button className={isRunning ? "stop-btn" : "start-btn"} onClick={toggleServer}>{isRunning ? "停止代理" : "启动代理"}</button>
         </div>
-        <p style={{ marginTop: "8px", fontSize: "13px", opacity: 0.8 }}>Status: {isRunning ? "Running" : "Stopped"}</p>
+        <p style={{ marginTop: "8px", fontSize: "13px", opacity: 0.8 }}>状态：{isRunning ? "运行中" : "已停止"}</p>
       </div>
       <div className="tools-section">
-        <h3>Default Target</h3>
+        <h3>默认目标</h3>
         <p style={{ fontSize: "13px", opacity: 0.7, marginBottom: "6px" }}>
-          Requests matching no rule below are forwarded here.
+          未匹配下方任何规则的请求将转发到此地址。
         </p>
         <input
           className="tools-input"
@@ -916,30 +900,30 @@ function ProxyTab({
         />
       </div>
       <div className="tools-section">
-        <h3>Forwarding Rules</h3>
+        <h3>转发规则</h3>
         <p style={{ fontSize: "13px", opacity: 0.7, marginBottom: "6px" }}>
-          If a request path starts with the prefix it is forwarded to the target (nginx-style prefix match).
+          请求路径以此前缀开头时，将转发到对应目标（nginx 风格前缀匹配）。
         </p>
         <div className="ip-query-row">
-          <input className="tools-input" placeholder="Path prefix, e.g. /api" value={newPrefix} onChange={(e) => setNewPrefix(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addRoute(); }} />
-          <input className="tools-input" placeholder="Target, e.g. http://localhost:3000" value={newTarget} onChange={(e) => setNewTarget(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addRoute(); }} />
-          <button onClick={addRoute}>Add Rule</button>
+          <input className="tools-input" placeholder="路径前缀，例如 /api" value={newPrefix} onChange={(e) => setNewPrefix(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addRoute(); }} />
+          <input className="tools-input" placeholder="目标，例如 http://localhost:3000" value={newTarget} onChange={(e) => setNewTarget(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addRoute(); }} />
+          <button onClick={addRoute}>添加规则</button>
         </div>
         <div style={{ marginTop: "12px" }}>
           {routes.map((route) => (
             <div key={route.id} className="tools-output-row" style={{ marginBottom: "4px", opacity: route.enabled ? 1 : 0.5 }}>
               <code className="tools-code">{route.path_prefix} → {route.target}</code>
-              <button className="copy-btn" onClick={() => toggleRoute(route.id)}>{route.enabled ? "Disable" : "Enable"}</button>
-              <button className="copy-btn" onClick={() => removeRoute(route.id)}>Remove</button>
+              <button className="copy-btn" onClick={() => toggleRoute(route.id)}>{route.enabled ? "禁用" : "启用"}</button>
+              <button className="copy-btn" onClick={() => removeRoute(route.id)}>删除</button>
             </div>
           ))}
-          {routes.length === 0 && <p className="tools-hint">No rules configured</p>}
+          {routes.length === 0 && <p className="tools-hint">暂无规则</p>}
         </div>
       </div>
       <div className="tools-section">
-        <h3>Request Logs</h3>
+        <h3>请求日志</h3>
         <p className="tools-hint" style={{ marginBottom: "6px" }}>
-          Click a request to inspect full request/response details.
+          点击一条请求可查看完整的请求与响应详情。
         </p>
         <div className="req-log-list">
           {[...requestLogs].reverse().map((log) => {
@@ -961,7 +945,7 @@ function ProxyTab({
               </div>
             );
           })}
-          {requestLogs.length === 0 && <p className="tools-hint">No requests yet</p>}
+          {requestLogs.length === 0 && <p className="tools-hint">暂无请求记录</p>}
         </div>
         {requestLogs.length > 0 && (
           <button
@@ -972,21 +956,21 @@ function ProxyTab({
                 await invoke("clear_proxy_logs");
                 setState((s) => ({ ...s, requestLogs: [] }));
               } catch (e) {
-                pushLog(`Error clearing logs: ${String(e)}`);
+                pushLog(`清空日志失败：${friendlyError(e, "清空失败")}`);
               }
             }}
           >
-            Clear Logs
+            清空日志
           </button>
         )}
       </div>
       <div className="tools-section">
-        <h3>Activity Log</h3>
+        <h3>活动日志</h3>
         <div className="activity-log">
           {logs.map((log, i) => (
             <div className="activity-row" key={i}>{log}</div>
           ))}
-          {logs.length === 0 && <p className="tools-hint">No activity yet</p>}
+          {logs.length === 0 && <p className="tools-hint">暂无活动</p>}
         </div>
       </div>
 
@@ -999,7 +983,7 @@ function ProxyTab({
 
 /** Header table — headers are key/value pairs, so a table beats a JSON blob. */
 function HeaderTable({ rows }: { rows: [string, string][] }) {
-  if (rows.length === 0) return <div className="jv-empty">— no headers —</div>;
+  if (rows.length === 0) return <div className="jv-empty">— 暂无请求头 —</div>;
   return (
     <div className="hdr-table">
       {rows.map(([k, v], i) => (
@@ -1069,9 +1053,9 @@ function ProxyLogDetail({ log, onClose }: { log: ProxyLog; onClose: () => void }
           </div>
           <div className="log-modal-actions">
             <button className="copy-btn" onClick={() => navigator.clipboard.writeText(json)}>
-              Copy JSON
+              复制 JSON
             </button>
-            <button className="copy-btn" onClick={onClose}>Close</button>
+            <button className="copy-btn" onClick={onClose}>关闭</button>
           </div>
         </div>
 
@@ -1082,7 +1066,7 @@ function ProxyLogDetail({ log, onClose }: { log: ProxyLog; onClose: () => void }
               className={`log-modal-tab ${tab === t ? "active" : ""}`}
               onClick={() => setTab(t)}
             >
-              {t === "overview" ? "Overview" : t === "request" ? "Request" : "Response"}
+              {t === "overview" ? "概览" : t === "request" ? "请求" : "响应"}
             </button>
           ))}
         </div>
@@ -1090,23 +1074,23 @@ function ProxyLogDetail({ log, onClose }: { log: ProxyLog; onClose: () => void }
         <div className="log-modal-body">
           {tab === "overview" && (
             <div className="kv-grid">
-              <div className="kv-k">Status</div>
+              <div className="kv-k">状态</div>
               <div className="kv-v">
                 <span className={`log-status ${statusClass}`}>{log.status || "ERR"}</span>
               </div>
-              <div className="kv-k">Method</div>
+              <div className="kv-k">方法</div>
               <div className="kv-v mono">{log.method}</div>
               <div className="kv-k">URL</div>
               <div className="kv-v mono breakable">{log.url}</div>
-              <div className="kv-k">Route</div>
-              <div className="kv-v mono">{log.route_match ?? <span className="jv-empty">default</span>}</div>
-              <div className="kv-k">Duration</div>
-              <div className="kv-v mono">{log.duration_ms} ms</div>
-              <div className="kv-k">Time</div>
+              <div className="kv-k">路由</div>
+              <div className="kv-v mono">{log.route_match ?? <span className="jv-empty">默认</span>}</div>
+              <div className="kv-k">耗时</div>
+              <div className="kv-v mono">{log.duration_ms} 毫秒</div>
+              <div className="kv-k">时间</div>
               <div className="kv-v mono">{new Date(log.timestamp).toLocaleString()}</div>
               {log.error && (
                 <>
-                  <div className="kv-k">Error</div>
+                  <div className="kv-k">错误</div>
                   <div className="kv-v log-error">{log.error}</div>
                 </>
               )}
@@ -1116,11 +1100,11 @@ function ProxyLogDetail({ log, onClose }: { log: ProxyLog; onClose: () => void }
           {tab === "request" && (
             <>
               <div className="log-block-title">
-                Headers <span className="log-count">{log.request_headers.length}</span>
+                请求头 <span className="log-count">{log.request_headers.length}</span>
               </div>
               <HeaderTable rows={log.request_headers} />
               <div className="log-block-title">
-                Body <span className="log-count">{bodyLabel(log.request_body)}</span>
+                请求体 <span className="log-count">{bodyLabel(log.request_body)}</span>
               </div>
               <BodyView body={log.request_body} />
             </>
@@ -1130,11 +1114,11 @@ function ProxyLogDetail({ log, onClose }: { log: ProxyLog; onClose: () => void }
             <>
               {log.error && <div className="log-error-banner">{log.error}</div>}
               <div className="log-block-title">
-                Headers <span className="log-count">{log.response_headers.length}</span>
+                响应头 <span className="log-count">{log.response_headers.length}</span>
               </div>
               <HeaderTable rows={log.response_headers} />
               <div className="log-block-title">
-                Body <span className="log-count">{bodyLabel(log.response_body)}</span>
+                响应体 <span className="log-count">{bodyLabel(log.response_body)}</span>
               </div>
               <BodyView body={log.response_body} />
             </>
@@ -1151,6 +1135,9 @@ function IpTab() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<IpInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Shared toast hook — matches the rest of the Tools window and routes copy
+  // failures through the shared error-to-Chinese mapper.
+  const { toast, showToast } = useToast();
 
   // Fetch my own IP on mount via the Rust backend (avoids WebView CSP / net
   // permission issues that break `fetch` in a packaged build).
@@ -1165,6 +1152,15 @@ function IpTab() {
     })();
   }, []);
 
+  const copy = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast("已复制");
+    } catch (e) {
+      showToast(friendlyError(e, "复制失败"), "error");
+    }
+  };
+
   const doLookup = async (ip?: string) => {
     const target = (ip || queryInput).trim();
     if (!target) return;
@@ -1174,30 +1170,28 @@ function IpTab() {
     try {
       const data = await invoke<IpInfo>("ip_lookup", { target });
       if ((data as any).error) {
-        setError((data as any).reason || (data as any).message || "Lookup failed");
+        setError((data as any).reason || (data as any).message || "查询失败");
       } else {
         setResult(data);
       }
     } catch (e) {
-      setError(String(e));
+      setError(friendlyError(e, "查询失败"));
     } finally {
       setLoading(false);
     }
   };
 
-  const copy = (text: string) => navigator.clipboard.writeText(text);
-
   const resultRows: { label: string; value: string }[] = result
     ? [
         { label: "IP", value: result.ip || "-" },
-        { label: "City", value: result.city || "-" },
-        { label: "Region", value: result.region || "-" },
-        { label: "Country", value: result.country_name ? `${result.country_name} (${result.country || ""})` : "-" },
-        { label: "Postal", value: result.postal || "-" },
-        { label: "Latitude", value: result.latitude != null ? String(result.latitude) : "-" },
-        { label: "Longitude", value: result.longitude != null ? String(result.longitude) : "-" },
-        { label: "Timezone", value: result.timezone || "-" },
-        { label: "Org", value: result.org || "-" },
+        { label: "城市", value: result.city || "-" },
+        { label: "省份/州", value: result.region || "-" },
+        { label: "国家/地区", value: result.country_name ? `${result.country_name}（${result.country || ""}）` : "-" },
+        { label: "邮编", value: result.postal || "-" },
+        { label: "纬度", value: result.latitude != null ? String(result.latitude) : "-" },
+        { label: "经度", value: result.longitude != null ? String(result.longitude) : "-" },
+        { label: "时区", value: result.timezone || "-" },
+        { label: "组织", value: result.org || "-" },
         { label: "ASN", value: result.asn || "-" },
       ]
     : [];
@@ -1205,25 +1199,25 @@ function IpTab() {
   return (
     <div className="tools-tab-content">
       <div className="tools-section">
-        <h3>Your IP</h3>
+        <h3>本机 IP</h3>
         <div className="tools-output-row">
           <span className="tools-label">IP</span>
-          <code className="tools-code">{myIp || "Loading…"}</code>
+          <code className="tools-code">{myIp || "加载中…"}</code>
           {myIp && (
-            <button className="copy-btn" onClick={() => copy(myIp)}>Copy</button>
+            <button className="copy-btn" onClick={() => copy(myIp)}>复制</button>
           )}
           {myIp && (
-            <button className="copy-btn" onClick={() => { setQueryInput(myIp); doLookup(myIp); }}>Lookup ↗</button>
+            <button className="copy-btn" onClick={() => { setQueryInput(myIp); doLookup(myIp); }}>查询 ↗</button>
           )}
         </div>
       </div>
 
       <div className="tools-section">
-        <h3>IP Lookup</h3>
+        <h3>IP 归属地查询</h3>
         <div className="ip-query-row">
           <input
             className="tools-input"
-            placeholder="Enter IP or domain…"
+            placeholder="输入 IP 或域名…"
             value={queryInput}
             onChange={(e) => setQueryInput(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") doLookup(); }}
@@ -1233,7 +1227,7 @@ function IpTab() {
             disabled={loading || !queryInput.trim()}
             onClick={() => doLookup()}
           >
-            {loading ? "…" : "Lookup"}
+            {loading ? "查询中…" : "查询"}
           </button>
         </div>
         {error && <p className="tools-error">{error}</p>}
@@ -1241,20 +1235,22 @@ function IpTab() {
 
       {result && (
         <div className="tools-section">
-          <h3>Result</h3>
+          <h3>查询结果</h3>
           <div className="tools-output-group">
             {resultRows.map((r) => (
               <div className="tools-output-row" key={r.label}>
                 <span className="tools-label">{r.label}</span>
                 <code className="tools-code">{r.value}</code>
                 {r.value !== "-" && (
-                  <button className="copy-btn" onClick={() => copy(r.value)}>Copy</button>
+                  <button className="copy-btn" onClick={() => copy(r.value)}>复制</button>
                 )}
               </div>
             ))}
           </div>
         </div>
       )}
+
+      {toast && <div className={`tools-toast tools-toast-${toast.type}`}>{toast.msg}</div>}
     </div>
   );
 }
@@ -1266,11 +1262,11 @@ function IpTab() {
 type Tab = "timestamp" | "cron" | "regex" | "ip" | "proxy";
 
 const TABS: { id: Tab; label: string; icon: string }[] = [
-  { id: "timestamp", label: "Timestamp", icon: "🕐" },
-  { id: "cron",      label: "Cron",      icon: "⚙️" },
-  { id: "regex",     label: "Regex",     icon: "🔍" },
-  { id: "ip",        label: "IP Lookup", icon: "🌐" },
-  { id: "proxy",     label: "Proxy",     icon: "🔀" },
+  { id: "timestamp", label: "时间戳", icon: "🕐" },
+  { id: "cron",      label: "Cron",   icon: "⚙️" },
+  { id: "regex",     label: "正则",   icon: "🔍" },
+  { id: "ip",        label: "IP 查询", icon: "🌐" },
+  { id: "proxy",     label: "代理",   icon: "🔀" },
 ];
 
 export default function ToolsApp() {
