@@ -54,3 +54,12 @@ build_out.txt
 check_out.txt
 docs
 .easyClaw
+
+# One-off task/check scripts and transient files
+CARGO_CHECK_TASK_STATUS.md
+check_api.js
+check_brackets.ps1
+check_tools.js
+.tmp/
+*.tmp
+src-tauri/.cargo/
