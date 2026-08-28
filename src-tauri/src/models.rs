@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use chrono::Utc;
-use sha2::Digest;
 
 // ── Clipboard Item ──────────────────────────────────────────────
 
@@ -17,32 +16,46 @@ pub struct ClipboardItem {
     pub id: String,
     pub content: String,
     pub timestamp: i64,
-    pub content_type: String,
-    pub pinned: bool,
+    /// Tags assigned by the user. Empty by default; an external index may
+    /// (and currently does) auto-tag based on the content.
     pub tags: Vec<String>,
-    pub incognito: bool,
-    pub hash: String,
+    /// True when the user has promoted this item into the "Saved Notes" view.
     pub saved_as_note: bool,
+    /// Cross-reference id of the note created from this item, if any. Lets the
+    /// UI jump straight to the note when the user clicks the link.
     pub source_clip_id: Option<String>,
+    /// Discriminator for the payload kind. The `ItemType` enum is the single
+    /// source of truth — an older `content_type: String` field was removed
+    /// because nothing read it.
     #[serde(rename = "type", default)]
     pub item_type: ItemType,
+    /// User-starred; surfaced at the top of the list.
     #[serde(default)]
     pub favorite: bool,
 }
 
+// Backwards-compat note: older `history.json` files may have contained a
+// `content_type` and `hash` field. The current `ClipboardItem` struct
+// drops both — `item_type` carries the same enum info, and image
+// de-dup is done in-memory by the manager (`last_image_hash`) rather
+// than persisted per-item. Serde's default behaviour (no
+// `#[serde(deny_unknown_fields)]` on this struct) silently discards
+// those legacy keys on load, so old data files keep working. New
+// history files written by this version will simply not contain them.
+//
+// `Note::pinned` and the manager-level `incognito` flag are unrelated
+// to this removal — they still exist (note sort order depends on
+// `pinned`, and `incognito` is an in-memory privacy toggle, not a
+// serialised field).
+
 impl ClipboardItem {
     pub fn new_text(content: String) -> Self {
         let now = Utc::now().timestamp_millis();
-        let hash = format!("{:x}", sha2::Sha256::digest(&content));
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             content,
             timestamp: now,
-            content_type: "text/plain".into(),
-            pinned: false,
             tags: vec![],
-            incognito: false,
-            hash,
             saved_as_note: false,
             source_clip_id: None,
             item_type: ItemType::Text,
@@ -52,16 +65,11 @@ impl ClipboardItem {
 
     pub fn new_image(desc: String) -> Self {
         let now = Utc::now().timestamp_millis();
-        let hash = format!("{:x}", sha2::Sha256::digest(&desc));
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             content: desc,
             timestamp: now,
-            content_type: "image".into(),
-            pinned: false,
             tags: vec![],
-            incognito: false,
-            hash,
             saved_as_note: false,
             source_clip_id: None,
             item_type: ItemType::Image,
@@ -71,16 +79,11 @@ impl ClipboardItem {
 
     pub fn new_files(content: String) -> Self {
         let now = Utc::now().timestamp_millis();
-        let hash = format!("{:x}", sha2::Sha256::digest(&content));
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             content,
             timestamp: now,
-            content_type: "files".into(),
-            pinned: false,
             tags: vec![],
-            incognito: false,
-            hash,
             saved_as_note: false,
             source_clip_id: None,
             item_type: ItemType::Files,
@@ -193,6 +196,22 @@ impl Default for AppConfig {
             api_shortcut: default_api_sc(),
         }
     }
+}
+
+/// Combined payload for `get_history_full` — items + stats + image data map
+/// (base64 data URLs, keyed by item id). Returning everything in one IPC
+/// call saves N+1 round-trips (one `get_history` + N `get_image_data`)
+/// and lets the front-end render the list with images already populated.
+///
+/// Images are only included for items of type Image; the map is sparse
+/// so a text-heavy history doesn't pay the base64 cost for nothing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryFull {
+    pub items: Vec<ClipboardItem>,
+    pub stats: (usize, u64),
+    /// Map from item id → data:image/png;base64,…
+    #[serde(default)]
+    pub images: std::collections::HashMap<String, String>,
 }
 
 /// Proxy configuration for the HTTP router.
