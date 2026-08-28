@@ -1,0 +1,305 @@
+/* =============================================================
+ * JsonView styles.
+ *
+ * These used to live in ToolsApp.css, which meant the JSON tree was only
+ * styled in the Tools window. ApiApp imports the same component but not
+ * that stylesheet, so pressing "美化" on a response produced an
+ * *unstyled* tree: no token colors, no monospace font, and a caret
+ * rendered as a bare ▶ glyph with no rotation. Styles now travel with the
+ * component, so any window that imports JsonView gets them.
+ *
+ * All colors come from theme tokens so light/dark both work.
+ * ============================================================= */
+
+.json-view,
+.jv-raw {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.7;
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  overflow: auto;
+  max-height: 340px;
+  /* Opt into selection: the tree is read-only output the user will want to
+   * copy, and `body { user-select: none }` would otherwise block it. */
+  user-select: text;
+}
+
+.jv-raw {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-secondary);
+}
+
+.jv-row {
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-radius: var(--radius-xs);
+  transition: background-color var(--dur-fast) var(--ease);
+}
+
+/* A faint guide per nesting level makes deep structures scannable — the
+ * single biggest readability win in a tree view, and what distinguishes a
+ * modern JSON viewer from a plain indented dump. */
+.jv-children {
+  position: relative;
+  padding-left: 14px;
+}
+
+.jv-children::before {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border-color);
+  opacity: 0.55;
+  transition: opacity var(--dur) var(--ease), background-color var(--dur) var(--ease);
+}
+
+/* Highlight the guide of the subtree under the cursor. */
+.jv-children:hover > .jv-children::before,
+.jv-children:hover::before {
+  opacity: 0.9;
+  background: var(--accent);
+}
+
+.jv-clickable {
+  cursor: pointer;
+}
+
+.jv-clickable:hover {
+  background-color: var(--bg-hover);
+}
+
+/* Disclosure triangle for objects/arrays. */
+.jv-caret {
+  display: inline-block;
+  width: 12px;
+  font-size: 8px;
+  color: var(--text-muted);
+  transition: transform var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+  transform: rotate(0deg);
+  vertical-align: 1px;
+}
+
+.jv-caret.open {
+  transform: rotate(90deg);
+}
+
+.jv-clickable:hover .jv-caret {
+  color: var(--accent);
+}
+
+/* Token colors. */
+.jv-key {
+  color: var(--accent);
+}
+
+.jv-string {
+  color: var(--green);
+}
+
+.jv-url {
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+.jv-number {
+  color: var(--orange);
+}
+
+.jv-boolean {
+  color: var(--red);
+  font-weight: 600;
+}
+
+.jv-null {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.jv-punct {
+  color: var(--text-muted);
+}
+
+.jv-summary {
+  color: var(--text-muted);
+  font-style: normal;
+  margin: 0 6px;
+  font-size: 10px;
+  /* Reads as a count badge rather than an italic aside, which is the
+   * convention in modern JSON viewers (DevTools, Insomnia). */
+  background: var(--bg-hover);
+  border-radius: var(--radius-full);
+  padding: 1px 7px;
+  vertical-align: 1px;
+  font-variant-numeric: tabular-nums;
+}
+
+.jv-empty {
+  color: var(--text-muted);
+  font-style: italic;
+  font-size: 12px;
+  padding: 6px 2px;
+}
+
+/* ── Line-number gutter ──────────────────────────────────────
+ * Off by default; enabled by JsonView's `lineNumbers` prop. Uses a CSS
+ * counter so no extra DOM per line is needed.
+ *
+ * The number is positioned against the scroll container, not the row. Laying
+ * it out inline (the original approach) meant it inherited the row's
+ * indentation, so numbers stair-stepped diagonally down the page instead of
+ * forming a column — deeper rows pushed their own number further right. This
+ * was already broken before the nesting change; rows simply carried the indent
+ * as an inline `padding-left` instead. Anchoring to `.json-view` and reserving
+ * the width with container padding gives a true fixed gutter. */
+.json-view.jv-numbered {
+  counter-reset: jvline;
+  position: relative;
+  /* Room for the gutter, so content never slides under the digits. */
+  padding-left: 3.6em;
+}
+
+.json-view.jv-numbered .jv-row {
+  counter-increment: jvline;
+}
+
+.json-view.jv-numbered .jv-row::before {
+  content: counter(jvline);
+  position: absolute;
+  /* Aligns with the container's own padding box. */
+  left: 0;
+  width: 2.9em;
+  text-align: right;
+  color: var(--text-muted);
+  opacity: 0.45;
+  user-select: none;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Search highlight ───────────────────────────────────────── */
+.jv-hit {
+  background-color: var(--warn-bg);
+  border-radius: var(--radius-xs);
+  /* Padding without affecting line box height, so highlighted runs don't
+   * make their line taller than its neighbours. */
+  padding: 0 1px;
+  box-shadow: 0 0 0 1px var(--warn-bg);
+}
+
+.jv-hit-active {
+  background-color: var(--accent);
+  color: var(--bg-primary);
+  border-radius: var(--radius-xs);
+  padding: 0 1px;
+  font-weight: 600;
+}
+
+/* ── Toolbar (expand/collapse all, search, path copy) ───────── */
+.jv-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.jv-tool-btn {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  box-shadow: var(--shadow-sm);
+  transition: color var(--dur) var(--ease), background-color var(--dur) var(--ease),
+    border-color var(--dur) var(--ease), transform var(--dur-fast) var(--ease);
+}
+
+.jv-tool-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+  border-color: var(--accent);
+}
+
+/* A 1px nudge on press is what makes a button feel physical rather than
+ * like a coloured rectangle. */
+.jv-tool-btn:active {
+  transform: translateY(1px);
+}
+
+.jv-tool-btn:focus-visible,
+.jv-search:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+  border-color: var(--accent);
+}
+
+.jv-search {
+  flex: 1;
+  min-width: 120px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  padding: 4px 9px;
+  font-size: 11px;
+  outline: none;
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+}
+
+.jv-search:focus {
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+
+.jv-search-count {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Copy-path affordance, revealed on row hover.
+ * `visibility` rather than `display` so the button occupies its space at all
+ * times — otherwise revealing it would reflow the row's text under the
+ * cursor. Opacity is animated for a softer reveal. */
+.jv-copy-path {
+  visibility: hidden;
+  opacity: 0;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 10px;
+  padding: 0 4px;
+  margin-left: 4px;
+  border-radius: var(--radius-xs);
+  transition: opacity var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+.jv-row:hover .jv-copy-path {
+  visibility: visible;
+  opacity: 1;
+}
+
+.jv-copy-path:hover {
+  color: var(--accent);
+  background: var(--bg-hover);
+}
+
+.jv-copy-path:focus-visible {
+  visibility: visible;
+  opacity: 1;
+  outline: none;
+  box-shadow: var(--ring);
+}

@@ -1,4 +1,4 @@
-/* ===== Tools App ===== */
+﻿/* ===== Tools App ===== */
 
 .tools-app {
   display: flex;
@@ -236,7 +236,7 @@
   border-radius: 6px;
 }
 
-/* Toast (shared look with App.css `.toast` — tools window has its own copy
+/* Toast (shared look with App.css `.toast` 鈥?tools window has its own copy
    because it doesn't import App.css's toast cascade; this is intentional so
    the four windows can theme independently later if needed). */
 .tools-toast {
@@ -477,106 +477,9 @@
   font-weight: 600;
 }
 
-/* =============================================================
- * JSON viewer (proxy log bodies)
- * All colors come from the theme tokens so light/dark both work.
- * ============================================================= */
-
-.json-view,
-.jv-raw {
-  font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
-  font-size: 12px;
-  line-height: 1.65;
-  background-color: var(--bg-primary);
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  padding: 10px 12px;
-  overflow: auto;
-  max-height: 340px;
-}
-
-.jv-raw {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--text-secondary);
-}
-
-.jv-row {
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.jv-clickable {
-  cursor: pointer;
-  border-radius: 4px;
-}
-
-.jv-clickable:hover {
-  background-color: var(--bg-hover);
-}
-
-/* Disclosure triangle for objects/arrays. */
-.jv-caret {
-  display: inline-block;
-  width: 12px;
-  font-size: 8px;
-  color: var(--text-muted);
-  transition: transform 0.12s ease;
-  transform: rotate(0deg);
-  vertical-align: 1px;
-}
-
-.jv-caret.open {
-  transform: rotate(90deg);
-}
-
-/* Token colors — the whole point of this change. */
-.jv-key {
-  color: var(--accent);
-}
-
-.jv-string {
-  color: var(--green);
-}
-
-.jv-url {
-  text-decoration: underline dotted;
-  text-underline-offset: 2px;
-}
-
-.jv-number {
-  color: var(--orange);
-}
-
-.jv-boolean {
-  color: var(--red);
-  font-weight: 600;
-}
-
-.jv-null {
-  color: var(--text-muted);
-  font-style: italic;
-}
-
-.jv-punct {
-  color: var(--text-muted);
-}
-
-.jv-summary {
-  color: var(--text-muted);
-  font-style: italic;
-  margin: 0 6px;
-  font-size: 11px;
-}
-
-.jv-empty {
-  color: var(--text-muted);
-  font-style: italic;
-  font-size: 12px;
-  padding: 6px 2px;
-}
-
+/* JSON viewer styles now live in JsonView.css, imported by the component
+ * itself. They used to be here, which meant ApiApp — which renders the same
+ * JsonView — got an unstyled tree. */
 /* =============================================================
  * Proxy request log list
  * ============================================================= */
@@ -917,7 +820,7 @@
   flex-wrap: wrap;
 }
 
-/* Segmented control for 端口 / 进程 */
+/* Segmented control for 绔彛 / 杩涚▼ */
 .proc-switch {
   display: inline-flex;
   border: 1px solid var(--border-color);
@@ -1027,7 +930,7 @@
   white-space: nowrap;
 }
 
-/* Destructive action — visually distinct from the neutral copy buttons so a
+/* Destructive action 鈥?visually distinct from the neutral copy buttons so a
    kill can't be confused with a copy at a glance. */
 .proc-danger {
   border-color: var(--red) !important;
