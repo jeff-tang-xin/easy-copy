@@ -236,6 +236,49 @@
   border-radius: 6px;
 }
 
+/* Toast (shared look with App.css `.toast` — tools window has its own copy
+   because it doesn't import App.css's toast cascade; this is intentional so
+   the four windows can theme independently later if needed). */
+.tools-toast {
+  position: fixed;
+  bottom: 48px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 8px 18px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  z-index: 9999;
+  max-width: 90%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  animation: tools-toast-slide-in 0.2s ease;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
+}
+
+.tools-toast-success {
+  background: var(--green);
+  color: #fff;
+}
+
+.tools-toast-error {
+  background: var(--red);
+  color: #fff;
+}
+
+@keyframes tools-toast-slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
 .tools-hint {
   color: var(--text-secondary);
   font-size: 13px;
@@ -862,4 +905,135 @@
   font-size: 12px;
   margin-bottom: 12px;
   font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
+}
+
+/* ===== Process & Port manager ===== */
+
+.proc-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+/* Segmented control for 端口 / 进程 */
+.proc-switch {
+  display: inline-flex;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.proc-switch-btn {
+  padding: 7px 14px;
+  font-size: 12px;
+  border: none;
+  background-color: var(--bg-primary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.proc-switch-btn:not(:last-child) {
+  border-right: 1px solid var(--border-color);
+}
+
+.proc-switch-btn:hover {
+  color: var(--text-primary);
+}
+
+.proc-switch-btn.active {
+  background-color: var(--accent);
+  color: #fff;
+}
+
+/* Let the filter absorb leftover width so the refresh button stays right-aligned. */
+.proc-filter {
+  flex: 1;
+  min-width: 160px;
+  width: auto;
+}
+
+.proc-count {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+/* Fixed-height scroll region: the process list runs to hundreds of rows and
+   would otherwise push the whole window into a page-level scroll. */
+.proc-table-wrap {
+  max-height: 420px;
+  overflow-y: auto;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+}
+
+.proc-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.proc-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background-color: var(--bg-secondary);
+  text-align: left;
+  padding: 8px 10px;
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-color);
+  white-space: nowrap;
+}
+
+.proc-table tbody td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-primary);
+  vertical-align: middle;
+}
+
+.proc-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.proc-table tbody tr:hover {
+  background-color: var(--bg-hover, var(--bg-secondary));
+}
+
+.proc-mono {
+  font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
+}
+
+.proc-port {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.proc-empty {
+  text-align: center;
+  padding: 20px !important;
+  color: var(--text-secondary);
+}
+
+.proc-confirm {
+  display: inline-flex;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+/* Destructive action — visually distinct from the neutral copy buttons so a
+   kill can't be confused with a copy at a glance. */
+.proc-danger {
+  border-color: var(--red) !important;
+  color: var(--red) !important;
+}
+
+.proc-danger:hover {
+  background-color: var(--danger-bg) !important;
 }

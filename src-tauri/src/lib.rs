@@ -8,9 +8,11 @@ mod models;
 mod notes;
 mod api;
 mod proxy;
+mod process;
 mod screenshot;
 
 use crate::api::*;
+use crate::process::{list_processes, list_ports, kill_process};
 use crate::proxy::{
     start_proxy, stop_proxy, get_proxy_logs, clear_proxy_logs,
     get_proxy_status, set_proxy_default_target, upsert_proxy_route,
@@ -1040,6 +1042,9 @@ pub fn run() {
             stop_proxy,
             get_proxy_logs,
             clear_proxy_logs,
+            list_processes,
+            list_ports,
+            kill_process,
             capture_screenshot,
             trigger_screenshot,
             save_screenshot,

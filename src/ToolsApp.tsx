@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -719,6 +719,23 @@ interface ProxyRoute {
   enabled: boolean;
 }
 
+/** One bound socket, as returned by the `list_ports` command. */
+interface PortInfo {
+  protocol: string;
+  local_addr: string;
+  port: number;
+  foreign_addr: string;
+  state: string;
+  pid: number;
+  process_name: string;
+}
+
+/** One running process, as returned by the `list_processes` command. */
+interface ProcessInfo {
+  pid: number;
+  name: string;
+  memory_kb: number | null;
+}
 interface ProxyLog {
   id: string;
   timestamp: number;
@@ -1131,6 +1148,7 @@ function ProxyLogDetail({ log, onClose }: { log: ProxyLog; onClose: () => void }
 
 function IpTab() {
   const [myIp, setMyIp] = useState("");
+  const [myIpError, setMyIpError] = useState<string | null>(null);
   const [queryInput, setQueryInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<IpInfo | null>(null);
@@ -1141,16 +1159,23 @@ function IpTab() {
 
   // Fetch my own IP on mount via the Rust backend (avoids WebView CSP / net
   // permission issues that break `fetch` in a packaged build).
-  useEffect(() => {
-    (async () => {
-      try {
-        const data = await invoke<IpInfo>("ip_lookup", { target: null });
-        setMyIp(data.ip || "");
-      } catch {
-        // silent fail
-      }
-    })();
+  // Surfaces failures instead of swallowing them: a silent catch left the UI
+  // stuck on "加载中…" forever with no hint that the lookup had failed.
+  const loadMyIp = useCallback(async () => {
+    setMyIpError(null);
+    try {
+      const data = await invoke<IpInfo>("ip_lookup", { target: null });
+      setMyIp(data.ip || "");
+      if (!data.ip) setMyIpError("未获取到 IP");
+    } catch (e) {
+      setMyIp("");
+      setMyIpError(friendlyError(e, "获取失败"));
+    }
   }, []);
+
+  useEffect(() => {
+    void loadMyIp();
+  }, [loadMyIp]);
 
   const copy = async (text: string) => {
     try {
@@ -1164,16 +1189,16 @@ function IpTab() {
   const doLookup = async (ip?: string) => {
     const target = (ip || queryInput).trim();
     if (!target) return;
+    // Ignore re-entry while a lookup is in flight: two concurrent requests
+    // would race and the slower one could overwrite the newer result.
+    if (loading) return;
     setLoading(true);
     setError(null);
     setResult(null);
     try {
-      const data = await invoke<IpInfo>("ip_lookup", { target });
-      if ((data as any).error) {
-        setError((data as any).reason || (data as any).message || "查询失败");
-      } else {
-        setResult(data);
-      }
+      // Business failures (invalid IP, provider down) come back as a rejected
+      // promise from the Rust side, so `catch` is the only failure path.
+      setResult(await invoke<IpInfo>("ip_lookup", { target }));
     } catch (e) {
       setError(friendlyError(e, "查询失败"));
     } finally {
@@ -1202,12 +1227,17 @@ function IpTab() {
         <h3>本机 IP</h3>
         <div className="tools-output-row">
           <span className="tools-label">IP</span>
-          <code className="tools-code">{myIp || "加载中…"}</code>
+          <code className="tools-code">
+            {myIp || (myIpError ? `— ${myIpError}` : "加载中…")}
+          </code>
           {myIp && (
             <button className="copy-btn" onClick={() => copy(myIp)}>复制</button>
           )}
           {myIp && (
             <button className="copy-btn" onClick={() => { setQueryInput(myIp); doLookup(myIp); }}>查询 ↗</button>
+          )}
+          {!myIp && myIpError && (
+            <button className="copy-btn" onClick={() => void loadMyIp()}>重试</button>
           )}
         </div>
       </div>
@@ -1256,10 +1286,234 @@ function IpTab() {
 }
 
 /* =============================================================
+ * Process & Port manager
+ * ============================================================= */
+
+type ProcView = "ports" | "processes";
+
+function ProcessTab() {
+  const [view, setView] = useState<ProcView>("ports");
+  const [ports, setPorts] = useState<PortInfo[]>([]);
+  const [procs, setProcs] = useState<ProcessInfo[]>([]);
+  const [filter, setFilter] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Two-step confirm: a mis-click on "结束" could kill the user's editor,
+  // so the row must be armed before the kill actually fires.
+  const [pendingKill, setPendingKill] = useState<number | null>(null);
+  const { toast, showToast } = useToast();
+  // Monotonic request id: a slow refresh must not overwrite the results of a
+  // newer one (easy to trigger by toggling 端口/进程 quickly, since the two
+  // fetches take different amounts of time).
+  const reqSeq = useRef(0);
+
+  const refresh = useCallback(async () => {
+    const seq = ++reqSeq.current;
+    setLoading(true);
+    setError(null);
+    try {
+      if (view === "ports") {
+        const rows = await invoke<PortInfo[]>("list_ports");
+        if (seq !== reqSeq.current) return;
+        setPorts(rows);
+      } else {
+        const rows = await invoke<ProcessInfo[]>("list_processes");
+        if (seq !== reqSeq.current) return;
+        setProcs(rows);
+      }
+      setPendingKill(null);
+    } catch (e) {
+      if (seq !== reqSeq.current) return;
+      setError(friendlyError(e, "获取失败"));
+    } finally {
+      // Only the newest request owns the spinner, otherwise a stale response
+      // clears it while the current fetch is still running.
+      if (seq === reqSeq.current) setLoading(false);
+    }
+  }, [view]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const kill = useCallback(
+    async (pid: number, label: string, force: boolean) => {
+      try {
+        await invoke("kill_process", { pid, force });
+        showToast(`已结束 ${label} (${pid})`);
+        // Re-list rather than splicing locally: killing a parent can take
+        // several children with it, so the local guess would be wrong.
+        await refresh();
+      } catch (e) {
+        showToast(friendlyError(e, "结束失败"), "error");
+      }
+    },
+    [refresh, showToast],
+  );
+
+  // Filtering is derived state, not stored — keeps the list and the query
+  // from drifting out of sync after a refresh.
+  const shownPorts = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    if (!q) return ports;
+    return ports.filter(
+      (p) =>
+        String(p.port).includes(q) ||
+        p.process_name.toLowerCase().includes(q) ||
+        String(p.pid).includes(q) ||
+        p.local_addr.toLowerCase().includes(q),
+    );
+  }, [ports, filter]);
+
+  const shownProcs = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    if (!q) return procs;
+    return procs.filter(
+      (p) => p.name.toLowerCase().includes(q) || String(p.pid).includes(q),
+    );
+  }, [procs, filter]);
+
+  const fmtMem = (kb: number | null) =>
+    kb == null ? "—" : kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${kb} KB`;
+
+  const killCell = (pid: number, label: string) =>
+    pendingKill === pid ? (
+      <span className="proc-confirm">
+        <button className="copy-btn proc-danger" onClick={() => kill(pid, label, false)}>
+          结束
+        </button>
+        <button className="copy-btn proc-danger" onClick={() => kill(pid, label, true)}>
+          强制
+        </button>
+        <button className="copy-btn" onClick={() => setPendingKill(null)}>
+          取消
+        </button>
+      </span>
+    ) : (
+      <button
+        className="copy-btn proc-danger"
+        onClick={() => setPendingKill(pid)}
+        aria-label={`结束进程 ${label}`}
+      >
+        结束…
+      </button>
+    );
+
+  return (
+    <div className="tools-tab-content">
+      <div className="tools-section">
+        <div className="proc-toolbar">
+          <div className="proc-switch" role="tablist" aria-label="视图切换">
+            <button
+              role="tab"
+              aria-selected={view === "ports"}
+              className={`proc-switch-btn ${view === "ports" ? "active" : ""}`}
+              onClick={() => setView("ports")}
+            >
+              端口
+            </button>
+            <button
+              role="tab"
+              aria-selected={view === "processes"}
+              className={`proc-switch-btn ${view === "processes" ? "active" : ""}`}
+              onClick={() => setView("processes")}
+            >
+              进程
+            </button>
+          </div>
+          <input
+            className="tools-input proc-filter"
+            placeholder={view === "ports" ? "过滤端口 / PID / 进程名…" : "过滤进程名 / PID…"}
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            aria-label="过滤"
+          />
+          <button className="tools-btn" onClick={() => void refresh()} disabled={loading}>
+            {loading ? "刷新中…" : "刷新"}
+          </button>
+        </div>
+
+        {error && <div className="tools-error">{error}</div>}
+
+        <div className="proc-count">
+          {view === "ports"
+            ? `${shownPorts.length} / ${ports.length} 个端口`
+            : `${shownProcs.length} / ${procs.length} 个进程`}
+        </div>
+
+        <div className="proc-table-wrap">
+          {view === "ports" ? (
+            <table className="proc-table">
+              <thead>
+                <tr>
+                  <th>协议</th>
+                  <th>本地地址</th>
+                  <th>端口</th>
+                  <th>状态</th>
+                  <th>PID</th>
+                  <th>进程</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {shownPorts.map((p) => (
+                  <tr key={`${p.protocol}-${p.local_addr}-${p.port}-${p.foreign_addr}-${p.pid}`}>
+                    <td>{p.protocol}</td>
+                    <td className="proc-mono">{p.local_addr}</td>
+                    <td className="proc-mono proc-port">{p.port}</td>
+                    <td>{p.state}</td>
+                    <td className="proc-mono">{p.pid}</td>
+                    <td>{p.process_name || "—"}</td>
+                    <td>{killCell(p.pid, p.process_name || String(p.pid))}</td>
+                  </tr>
+                ))}
+                {!loading && shownPorts.length === 0 && (
+                  <tr>
+                    <td colSpan={7} className="proc-empty">无匹配端口</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          ) : (
+            <table className="proc-table">
+              <thead>
+                <tr>
+                  <th>进程名</th>
+                  <th>PID</th>
+                  <th>内存</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {shownProcs.map((p) => (
+                  <tr key={p.pid}>
+                    <td>{p.name}</td>
+                    <td className="proc-mono">{p.pid}</td>
+                    <td className="proc-mono">{fmtMem(p.memory_kb)}</td>
+                    <td>{killCell(p.pid, p.name)}</td>
+                  </tr>
+                ))}
+                {!loading && shownProcs.length === 0 && (
+                  <tr>
+                    <td colSpan={4} className="proc-empty">无匹配进程</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
+
+      {toast && <div className={`tools-toast tools-toast-${toast.type}`}>{toast.msg}</div>}
+    </div>
+  );
+}
+
+/* =============================================================
  * Main
  * ============================================================= */
 
-type Tab = "timestamp" | "cron" | "regex" | "ip" | "proxy";
+type Tab = "timestamp" | "cron" | "regex" | "ip" | "proxy" | "process";
 
 const TABS: { id: Tab; label: string; icon: string }[] = [
   { id: "timestamp", label: "时间戳", icon: "🕐" },
@@ -1267,6 +1521,7 @@ const TABS: { id: Tab; label: string; icon: string }[] = [
   { id: "regex",     label: "正则",   icon: "🔍" },
   { id: "ip",        label: "IP 查询", icon: "🌐" },
   { id: "proxy",     label: "代理",   icon: "🔀" },
+  { id: "process",   label: "进程端口", icon: "🧩" },
 ];
 
 export default function ToolsApp() {
@@ -1334,6 +1589,7 @@ export default function ToolsApp() {
         {tab === "regex" && <RegexTab />}
         {tab === "ip" && <IpTab />}
         {tab === "proxy" && <ProxyTab state={proxyState} setState={setProxyState} />}
+        {tab === "process" && <ProcessTab />}
       </div>
     </div>
   );
