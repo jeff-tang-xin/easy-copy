@@ -14,6 +14,61 @@ edition = "2021"
 name = "easy_copy_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# ── Linting: enable all clippy warnings by default ────────────
+#
+# Individual lints can be disabled per-file with `#[allow(...)]`
+# but the default is strict. This catches common mistakes like
+# `.unwrap()` in production paths, needless `clone()`, and
+# string formatting footguns.
+[lints.clippy]
+all = "warn"
+nursery = "warn"
+# Allow `unwrap()` for now — the codebase uses it deliberately in
+# setup/test code where failure means a hard crash is appropriate.
+unwrap_used = "allow"
+expect_used = "allow"
+# Allow `todo!` / `unimplemented!` in development.
+todo = "allow"
+# `missing_errors_doc` is pedantry for an internal app.
+missing_errors_doc = "allow"
+# `missing_panics_doc` same rationale.
+missing_panics_doc = "allow"
+# `module_name_repetitions` fires too often on `api_*` / `proxy_*`.
+module_name_repetitions = "allow"
+# `too_many_lines` is a blunt instrument; we split by module instead.
+too_many_lines = "allow"
+# `must_use_candidate` is noisy on internal helpers.
+must_use_candidate = "allow"
+# `implicit_return` is style, not correctness.
+implicit_return = "allow"
+# `if_then_some_else_none` is a style preference.
+if_then_some_else_none = "allow"
+# `single_match_else` / `match_bool` are style preferences.
+single_match_else = "allow"
+match_bool = "allow"
+# `shadow_reuse` / `shadow_same` are style, not bugs.
+shadow_reuse = "allow"
+shadow_same = "allow"
+# `significant_drop_tightening` is a perf hint, not needed.
+significant_drop_tightening = "allow"
+# `use_sync_lazycell` / `use_lazy_cell` — not available in our MSRV.
+use_sync_lazy_cell = "allow"
+use_lazy_cell = "allow"
+# `cast_possible_truncation` — we know what we're doing with u64→usize.
+cast_possible_truncation = "allow"
+# `cast_sign_loss` — same rationale.
+cast_sign_loss = "allow"
+# `ptr_as_ptr` — style, not correctness.
+ptr_as_ptr = "allow"
+# `let_underscore_untyped` — pattern match style, not a bug.
+let_underscore_untyped = "allow"
+
+[lints.rust]
+# Hard errors on unused imports / variables in release builds.
+unused_imports = "warn"
+unused_variables = "warn"
+dead_code = "warn"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -34,12 +89,12 @@ sha2 = "0.10"
 base64 = "0.22"
 clipboard-win = "5"
 xcap = "0.0.13"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "cookies", "multipart"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "cookies", "multipart", "stream"] }
 # HTTP proxy dependencies
 axum = "0.7"
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
-hyper-rustls = { version = "0.27", features = ["http1", "tls12", "ring"] }
+hyper-rustls = { version = "0.27", features = ["http1", "tls12", "ring", "webpki-tokio"] }
 rustls = { version = "0.23", features = ["ring"] }
 futures-util = "0.3"
 http-body-util = "0.1"
