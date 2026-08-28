@@ -1,8 +1,18 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { enable, isEnabled, disable } from "@tauri-apps/plugin-autostart";
+import { useTheme } from "./hooks/useTheme";
+import { useToast } from "./hooks/useToast";
+import { friendlyError } from "./hooks/friendlyError";
+import { useClipboard, type AppConfig, type ClipboardItem } from "./hooks/useClipboard";
+import { useWindowLifecycle } from "./hooks/useWindowLifecycle";
+import {
+  IconSearch, IconTrash, IconText, IconFiles,
+  IconPower, IconWarning, IconZoomIn, IconZoomOut, IconZoomReset,
+  IconSun, IconMoon, IconAuto, IconUndo, IconIncognito,
+  IconSettings, IconExport, IconImport, IconCopy, TypeIcon,
+} from "./components/Icons";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 // Use PrismLight + register only the languages we need. Importing the full
@@ -56,140 +66,20 @@ const CODE_CUSTOM_STYLE = { margin: 0, background: "transparent", fontSize: 13 }
 // a huge minified blob will freeze the main thread for seconds.
 const HIGHLIGHT_MAX_CHARS = 100_000;
 
-/* ===== SVG Icon Components ===== */
-const IconSearch = () => (
-  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-    <circle cx="7" cy="7" r="5" stroke="currentColor" strokeWidth="1.5" />
-    <path d="M11 11l3.5 3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-  </svg>
-);
+// Hoisted to module scope: keeps the array stable across renders, and the
+// `.some()` call avoids the inner-function allocation the old code had.
+const EXECUTABLE_EXTENSIONS = [
+  ".exe", ".bat", ".cmd", ".ps1", ".vbs", ".vba", ".wsf", ".msi",
+  ".sh", ".bash", ".zsh", ".fish", ".py", ".pl", ".rb", ".php",
+  ".jar", ".app", ".com", ".scr", ".reg", ".inf", ".lnk",
+] as const;
 
-const IconTrash = () => (
-  <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-    <path d="M3 4h10M6 4V2.5h4V4M5 4l.5 9.5h5L11 4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-  </svg>
-);
+const isExecutableFile = (filePath: string): boolean => {
+  const lower = filePath.toLowerCase().trim();
+  return EXECUTABLE_EXTENSIONS.some((ext) => lower.endsWith(ext));
+};
 
-const IconText = () => (
-  <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-    <rect x="2.5" y="2" width="11" height="12" rx="1" stroke="currentColor" strokeWidth="1.2" />
-    <path d="M5 5.5h6M5 7.5h6M5 9.5h4" stroke="currentColor" strokeWidth="1" strokeLinecap="round" />
-  </svg>
-);
 
-const IconImage = () => (
-  <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-    <rect x="2" y="2" width="12" height="12" rx="1" stroke="currentColor" strokeWidth="1.2" />
-    <circle cx="5.5" cy="5.5" r="1.2" fill="currentColor" />
-    <path d="M2.5 12l3-3 2 2 3-3 3 2.5" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
-  </svg>
-);
-
-const IconFiles = () => (
-  <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-    <path d="M1.5 4h4l1.5 1.5H14.5V13.5H1.5z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
-  </svg>
-);
-
-const IconPower = () => (
-  <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
-    <path d="M8 2v6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-    <path d="M4.5 4a5.5 5.5 0 107 0" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" fill="none" />
-  </svg>
-);
-
-const IconWarning = () => (
-  <svg width="28" height="28" viewBox="0 0 24 24" fill="none">
-    <path d="M12 2L1 22h22L12 2z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
-    <path d="M12 9v5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-    <circle cx="12" cy="18" r="1.2" fill="currentColor" />
-  </svg>
-);
-
-const IconZoomIn = () => (
-  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-    <circle cx="7" cy="7" r="5" stroke="currentColor" strokeWidth="1.5" />
-    <path d="M7 5v4M5 7h4M11 11l3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-  </svg>
-);
-
-const IconZoomOut = () => (
-  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-    <circle cx="7" cy="7" r="5" stroke="currentColor" strokeWidth="1.5" />
-    <path d="M5 7h4M11 11l3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-  </svg>
-);
-
-const IconZoomReset = () => (
-  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-    <path d="M3 8a5 5 0 119 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-    <path d="M12 7v4h-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-  </svg>
-);
-
-const IconSun = () => (
-  <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-    <circle cx="8" cy="8" r="3" stroke="currentColor" strokeWidth="1.3" />
-    <path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.4 1.4M11.6 11.6L13 13M3 13l1.4-1.4M11.6 4.4L13 3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-  </svg>
-);
-
-const IconMoon = () => (
-  <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-    <path d="M13 8.5a5 5 0 11-5.5-5.5 4 4 0 005.5 5.5z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
-  </svg>
-);
-
-const IconAuto = () => (
-  <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-    <path d="M8 1.5a6.5 6.5 0 100 13z" fill="currentColor" opacity="0.4" />
-    <circle cx="8" cy="8" r="6.5" stroke="currentColor" strokeWidth="1.2" />
-  </svg>
-);
-
-const IconUndo = () => (
-  <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-    <path d="M3 6h7a4 4 0 110 8H6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-    <path d="M5 4L3 6l2 2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-  </svg>
-);
-
-const IconIncognito = () => (
-  <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-    <path d="M2 7l2-4h8l2 4" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
-    <rect x="1.5" y="7" width="13" height="2" rx="0.5" fill="currentColor" />
-    <circle cx="5" cy="11.5" r="2" stroke="currentColor" strokeWidth="1.2" />
-    <circle cx="11" cy="11.5" r="2" stroke="currentColor" strokeWidth="1.2" />
-  </svg>
-);
-
-const IconSettings = () => (
-  <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-    <path d="M8 5.5a2.5 2.5 0 100 5 2.5 2.5 0 000-5z" stroke="currentColor" strokeWidth="1.2" />
-    <path d="M8 1v2M8 13v2M2 8h2M12 8h2M3.5 3.5l1.4 1.4M11.1 11.1l1.4 1.4M3.5 12.5l1.4-1.4M11.1 4.9l1.4-1.4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-  </svg>
-);
-
-const IconExport = () => (
-  <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-    <path d="M8 2v8M5 5l3-3 3 3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-    <path d="M3 11v2.5h10V11" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-  </svg>
-);
-
-const IconImport = () => (
-  <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-    <path d="M8 10V2M5 7l3 3 3-3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-    <path d="M3 11v2.5h10V11" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-  </svg>
-);
-
-const IconCopy = () => (
-  <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-    <rect x="4" y="4" width="9" height="9" rx="1" stroke="currentColor" strokeWidth="1.2" />
-    <path d="M3 11V3a1 1 0 011-1h7" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-  </svg>
-);
 
 // Supported syntax-highlight languages the user can pick manually.
 const PREVIEW_LANGUAGES = [
@@ -210,40 +100,6 @@ function formatContent(text: string, lang: PreviewLang): string {
   return text;
 }
 
-type ItemType = "Text" | "Image" | "Files";
-
-interface ClipboardItem {
-  id: string;
-  type: ItemType;
-  content: string;
-  timestamp: string;
-  favorite: boolean;
-  tags: string[];
-  saved_as_note?: boolean;
-}
-
-interface ImageCache {
-  [id: string]: string;
-}
-
-interface AppConfig {
-  max_items: number;
-  poll_interval_ms: number;
-  clipboard_shortcut: string;
-  notes_shortcut: string;
-  tools_shortcut: string;
-  screenshot_shortcut: string;
-  api_shortcut: string;
-  copy_on_double_click: boolean;
-  storage_root: string | null;
-}
-
-interface ContextMenuState {
-  x: number;
-  y: number;
-  itemId: string;
-}
-
 function formatTime(ts: string): string {
   const date = new Date(ts);
   const now = new Date();
@@ -252,23 +108,26 @@ function formatTime(ts: string): string {
   const hours = Math.floor(diff / 3600000);
   const days = Math.floor(diff / 86400000);
 
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes}m ago`;
-  if (hours < 24) return `${hours}h ago`;
-  if (days < 7) return `${days}d ago`;
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${minutes} 分钟前`;
+  if (hours < 24) return `${hours} 小时前`;
+  if (days < 7) return `${days} 天前`;
   return date.toLocaleDateString();
 }
 
 function getDateGroup(ts: string): string {
+  // Fix: use calendar-day math (not fixed 24h) so items copied across DST
+  // boundaries still fall in the right bucket.
   const date = new Date(ts);
   const now = new Date();
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const yesterdayStart = new Date(todayStart.getTime() - 86400000);
-  const weekStart = new Date(todayStart.getTime() - 6 * 86400000);
+  const startOf = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const day = (a: Date, b: Date) =>
+    Math.floor((startOf(a) - startOf(b)) / 86_400_000);
 
-  if (date >= todayStart) return "Today";
-  if (date >= yesterdayStart) return "Yesterday";
-  if (date >= weekStart) return "This Week";
+  const dDays = day(now, date);
+  if (dDays <= 0) return "今天";
+  if (dDays === 1) return "昨天";
+  if (dDays < 7) return "本周";
   return date.toLocaleDateString();
 }
 
@@ -278,29 +137,44 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function TypeIcon({ type }: { type: ItemType }) {
-  switch (type) {
-    case "Image":
-      return <IconImage />;
-    case "Files":
-      return <IconFiles />;
-    default:
-      return <IconText />;
-  }
-}
+
 
 function App() {
-  const [items, setItems] = useState<ClipboardItem[]>([]);
-  const [search, setSearch] = useState("");
-  const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [imageCache, setImageCache] = useState<ImageCache>({});
-  const imageCacheRef = useRef<ImageCache>({});
+  // Toast: shared hook
+  const { toast, showToast } = useToast();
+
+  // Clipboard state & operations — all IPC + caching + debounced search
+  // is encapsulated in useClipboard. App.tsx is now pure rendering.
+  const {
+    items,
+    search,
+    setSearch,
+    copiedId,
+    imageCache,
+    stats,
+    incognito,
+    refresh,
+    handleCopy,
+    handleDelete,
+    undoToast,
+    handleUndoDelete,
+    handleClear,
+    handleToggleIncognito,
+    handleExport,
+    handleImport,
+  } = useClipboard({ showToast });
+
+  // useClipboard returns `setSearch` which is already debounced — alias it
+  // so JSX onChange handlers read more naturally.
+  const handleSearch = setSearch;
+
+  // Image viewer state
   const [enlargedImage, setEnlargedImage] = useState<string | null>(null);
+
   // Text preview modal
-  const [previewItem, setPreviewItem] = useState<ClipboardItem | null>(null);
+  const [previewItem, setPreviewItem] = useState<any>(null);
   const [previewLang, setPreviewLang] = useState<PreviewLang>('text');
   const [autoStartEnabled, setAutoStartEnabled] = useState(false);
-  const [toast, setToast] = useState<{ msg: string; type: "success" | "error" } | null>(null);
 
   // Executable file confirmation dialog
   const [execConfirm, setExecConfirm] = useState<{ path: string } | null>(null);
@@ -310,16 +184,6 @@ function App() {
 
   // Keyboard navigation selection
   const [selectedIndex, setSelectedIndex] = useState(-1);
-
-  // Stats: item count and storage size
-  const [stats, setStats] = useState<{ count: number; size: number }>({ count: 0, size: 0 });
-
-  // Delete undo
-  const [undoToast, setUndoToast] = useState<ClipboardItem | null>(null);
-  const undoTimerRef = useRef<number | null>(null);
-
-  // Incognito mode
-  const [incognito, setIncognito] = useState(false);
 
   // Settings panel
   const [showSettings, setShowSettings] = useState(false);
@@ -336,14 +200,14 @@ function App() {
     storage_root: null,
   });
 
-  // Context menu
-  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
-
-  // Search highlight
-  const searchRef = useRef("");
+  // Search input ref — for auto-focus on mouse enter & highlightText lookups.
+  // `searchRef` holds the current raw input value so `highlightText` can read
+  // the latest query without needing to be recreated on every keystroke.
   const searchInputRef = useRef<HTMLInputElement>(null);
-  // Debounce timer for search so we don't hit the backend on every keystroke.
-  const searchTimerRef = useRef<number | null>(null);
+  const searchRef = useRef("");
+
+  // Context menu
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; itemId: string } | null>(null);
 
   // Image viewer zoom & pan state
   const [imageZoom, setImageZoom] = useState(1);
@@ -355,6 +219,10 @@ function App() {
   // Track whether the window was maximized by us (to restore on close)
   const wasFullscreenRef = useRef(false);
 
+  // Window lifecycle: hide-on-close + shortcut-error toasts.
+  // Clipboard-update refresh is handled inside useClipboard.
+  useWindowLifecycle({ showToast });
+
   const openEnlargedImage = useCallback(async (url: string) => {
     wasFullscreenRef.current = true;
     try {
@@ -362,6 +230,9 @@ function App() {
       await win.setDecorations(false);
       await win.maximize();
     } catch (e) {
+      // Silently fall back to the in-app zoom view (image is still shown
+      // at its natural size in the modal). Window decoration glitches are
+      // cosmetic and recoverable on next open; not worth a toast.
       console.error("Failed to maximize window:", e);
     }
     setImageZoom(1);
@@ -378,39 +249,21 @@ function App() {
         await win.unmaximize();
         await win.setDecorations(true);
       } catch (e) {
-        console.error("Failed to restore window:", e);
+        // Surface this one: if we can't restore the window chrome, the user
+        // is about to interact with a borderless/invisible-frame window with
+        // no way to know why. They need to be told.
+        showToast(friendlyError(e, "恢复窗口失败"), "error");
       }
     }
-  }, []);
+  }, [showToast]);
 
   // Theme: auto (follow system), light, or dark
-  const [themeMode, setThemeMode] = useState<'auto' | 'light' | 'dark'>(
-    () => (localStorage.getItem('easy-copy-theme') as 'auto' | 'light' | 'dark') || 'auto'
-  );
-  const [systemDark, setSystemDark] = useState(
-    () => window.matchMedia('(prefers-color-scheme: dark)').matches
-  );
-  const theme = themeMode === 'auto' ? (systemDark ? 'dark' : 'light') : themeMode;
+  const { themeMode, setThemeMode, theme } = useTheme();
   // Memoised so switching preview language doesn't rebuild the style object.
   const codeStyle = useMemo(() => (theme === 'dark' ? oneDark : oneLight), [theme]);
 
-  useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme);
-  }, [theme]);
-
-  useEffect(() => {
-    const mq = window.matchMedia('(prefers-color-scheme: dark)');
-    const handler = (e: MediaQueryListEvent) => setSystemDark(e.matches);
-    mq.addEventListener('change', handler);
-    return () => mq.removeEventListener('change', handler);
-  }, []);
-
   const cycleTheme = () => {
-    setThemeMode((prev) => {
-      const next = prev === 'auto' ? 'light' : prev === 'light' ? 'dark' : 'auto';
-      localStorage.setItem('easy-copy-theme', next);
-      return next;
-    });
+    setThemeMode(themeMode === 'auto' ? 'light' : themeMode === 'light' ? 'dark' : 'auto');
   };
 
   // Check autostart status on mount
@@ -424,6 +277,7 @@ function App() {
   }, []);
 
   const handleToggleAutoStart = async () => {
+    const wasEnabled = autoStartEnabled;
     try {
       if (autoStartEnabled) {
         await disable();
@@ -433,7 +287,10 @@ function App() {
         setAutoStartEnabled(true);
       }
     } catch (e) {
-      console.error("Failed to toggle autostart:", e);
+      // The button clicked but the system call failed — roll the icon back
+      // so the UI matches reality, and tell the user *why* nothing happened.
+      setAutoStartEnabled(wasEnabled);
+      showToast(friendlyError(e, "切换开机自启失败"), "error");
     }
   };
 
@@ -469,68 +326,24 @@ function App() {
     setImagePos({ x: 0, y: 0 });
   };
 
-  const loadImage = useCallback(async (id: string) => {
-    if (imageCacheRef.current[id]) return;
-    const data = await invoke<string | null>("get_image_data", { id });
-    if (data) {
-      imageCacheRef.current[id] = data;
-      setImageCache((prev) => ({ ...prev, [id]: data }));
-    }
-  }, []);
-
-  const refresh = useCallback(async () => {
-    const history = await invoke<ClipboardItem[]>("get_history");
-    setItems(history);
-    history
-      .filter((i) => i.type === "Image")
-      .forEach((i) => loadImage(i.id));
-    const [count, size] = await invoke<[number, number]>("get_stats");
-    setStats({ count, size });
-  }, [loadImage]);
-
-  useEffect(() => {
-    refresh();
-    const unlisten = listen<ClipboardItem>("clipboard-update", () => {
-      refresh();
-    });
-    return () => {
-      unlisten.then((fn) => fn());
-    };
-  }, [refresh]);
-
-  // Intercept window close: hide instead of destroy so it can be reopened
-  useEffect(() => {
-    const win = getCurrentWindow();
-    const unlisten = win.onCloseRequested((event) => {
-      event.preventDefault();
-      win.hide();
-    });
-    return () => {
-      unlisten.then((fn) => fn());
-    };
-  }, []);
-
-  // Close image modal on Escape
-  useEffect(() => {
-    if (!enlargedImage) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') closeEnlargedImage();
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [enlargedImage, closeEnlargedImage]);
-
-  // Keyboard navigation: ArrowUp/Down to select, Enter to copy, Esc to hide window
+  // --- Keyboard navigation ---
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      // Don't interfere when image modal is open or user is typing in an input
-      if (enlargedImage) return;
+      const target = e.target as HTMLElement;
+      const inField = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
+
+      // Image preview has highest priority — Escape closes it, everything
+      // else is swallowed so the underlying ↑/↓ can't fire on the stale items
+      // list at the same time.
+      if (enlargedImage) {
+        if (e.key === 'Escape') closeEnlargedImage();
+        return;
+      }
       if (previewItem) {
         if (e.key === 'Escape') setPreviewItem(null);
         return;
       }
-      const target = e.target as HTMLElement;
-      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return;
+      if (inField) return;
 
       if (e.key === 'ArrowDown') {
         e.preventDefault();
@@ -540,14 +353,26 @@ function App() {
         setSelectedIndex((prev) => Math.max(prev - 1, 0));
       } else if (e.key === 'Enter' && selectedIndex >= 0 && selectedIndex < items.length) {
         e.preventDefault();
-        handleCopy(items[selectedIndex].id);
+        const targetItem = items[selectedIndex];
+        if (targetItem) handleCopy(targetItem.id);
       } else if (e.key === 'Escape') {
         getCurrentWindow().hide();
       }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [items, selectedIndex, enlargedImage, previewItem]);
+  }, [items, selectedIndex, enlargedImage, previewItem, closeEnlargedImage]);
+
+  // Remove the older single-purpose effect that only listened for Escape on
+  // the image modal. Its job is now folded into the unified handler above.
+  // (Keeping both installed leads to a window where both handlers fire and
+  // close the modal twice.)
+
+  // Keep searchRef in sync with the current search value so highlightText
+  // can read it without triggering re-renders of the renderContent closure.
+  useEffect(() => {
+    searchRef.current = search;
+  }, [search]);
 
   // Reset selection when list changes
   useEffect(() => {
@@ -570,188 +395,67 @@ function App() {
           await win.setFocus();
           searchInputRef.current?.focus();
         }
-      } catch (e) {
-        // ignore
+      } catch {
+        // ignore — focus is best-effort
       }
     };
     document.addEventListener('mouseenter', handleMouseEnter);
     return () => document.removeEventListener('mouseenter', handleMouseEnter);
   }, []);
 
-  const handleSearch = (value: string) => {
-    // Keep the input responsive by updating the field immediately, but debounce
-    // the backend query (150ms) so fast typing doesn't fire an invoke per key.
-    setSearch(value);
-    searchRef.current = value;
-    if (searchTimerRef.current !== null) {
-      clearTimeout(searchTimerRef.current);
-    }
-    searchTimerRef.current = window.setTimeout(async () => {
-      // Ignore stale runs if the input changed again after this timer was set.
-      if (searchRef.current !== value) return;
-      if (value.trim()) {
-        const results = await invoke<ClipboardItem[]>("search_history", { query: value });
-        if (searchRef.current !== value) return;
-        setItems(results);
-        results
-          .filter((i) => i.type === "Image")
-          .forEach((i) => loadImage(i.id));
-      } else {
-        refresh();
-      }
-    }, 150);
-  };
-
-  const handleCopy = useCallback(async (id: string) => {
-    try {
-      await invoke("copy_to_clipboard", { id });
-      setCopiedId(id);
-      setTimeout(() => setCopiedId(null), 1500);
-    } catch (err) {
-      showToast(`Copy failed: ${err}`, "error");
-    }
-  }, []);
-
-  const handleDelete = async (id: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    // Find the item before deleting for potential undo
-    const item = items.find((i) => i.id === id);
-    await invoke("delete_item", { id });
-    refresh();
-    if (item) {
-      // Clear any existing undo timer
-      if (undoTimerRef.current) window.clearTimeout(undoTimerRef.current);
-      setUndoToast(item);
-      undoTimerRef.current = window.setTimeout(() => {
-        setUndoToast(null);
-        undoTimerRef.current = null;
-      }, 3000);
-    }
-  };
-
-  const handleUndoDelete = async () => {
-    if (!undoToast) return;
-    if (undoTimerRef.current) {
-      window.clearTimeout(undoTimerRef.current);
-      undoTimerRef.current = null;
-    }
-    await invoke("restore_item", { item: undoToast });
-    setUndoToast(null);
-    refresh();
-  };
-
-  const handleClear = async () => {
-    await invoke("clear_history");
-    setItems([]);
-    setImageCache({});
-    imageCacheRef.current = {};
-    setClearConfirm(false);
-  };
-
-  const showToast = (msg: string, type: "success" | "error" = "success") => {
-    setToast({ msg, type });
-    setTimeout(() => setToast(null), 2500);
-  };
-
-  const EXECUTABLE_EXTENSIONS = [
-    ".exe", ".bat", ".cmd", ".ps1", ".vbs", ".vba", ".wsf", ".msi",
-    ".sh", ".bash", ".zsh", ".fish", ".py", ".pl", ".rb", ".php",
-    ".jar", ".app", ".com", ".scr", ".reg", ".inf", ".lnk",
-  ];
-
-  const isExecutableFile = (filePath: string): boolean => {
-    const lower = filePath.toLowerCase().trim();
-    return EXECUTABLE_EXTENSIONS.some((ext) => lower.endsWith(ext));
-  };
-
   const doOpenFile = async (filePath: string) => {
     const trimmed = filePath.trim();
     try {
       await invoke("open_file", { path: trimmed });
-      showToast(`Opened: ${trimmed}`, "success");
+      showToast(`已打开: ${trimmed}`, "success");
     } catch (err) {
-      showToast(`Failed: ${err}`, "error");
+      showToast(friendlyError(err, "打开失败"), "error");
     }
   };
 
-  const handleOpenFile = async (filePath: string, e: React.MouseEvent) => {
+  const handleOpenFile = (filePath: string, e: React.MouseEvent) => {
     e.stopPropagation();
     e.preventDefault();
     if (isExecutableFile(filePath)) {
       setExecConfirm({ path: filePath });
       return;
     }
-    doOpenFile(filePath);
+    void doOpenFile(filePath);
   };
 
-  const handleExecConfirm = async () => {
+  const handleExecConfirm = () => {
     if (!execConfirm) return;
-    await doOpenFile(execConfirm.path);
+    void doOpenFile(execConfirm.path);
     setExecConfirm(null);
   };
 
-  const handleExecCancel = () => {
-    setExecConfirm(null);
-  };
+  const handleExecCancel = () => setExecConfirm(null);
 
-  // handleTagClick removed with tag UI
-
-  // --- Incognito mode ---
-  const handleToggleIncognito = async () => {
-    const next = !incognito;
-    setIncognito(next);
-    await invoke("set_incognito", { enabled: next });
-    showToast(next ? "Incognito ON - recording paused" : "Incognito OFF - recording resumed");
-  };
+  // friendlyError is now imported from ./hooks/friendlyError so every
+  // window produces the same error messages. Previously this function
+  // lived inline in App.tsx; ApiApp had a thinner version that just
+  // truncated the raw string.
 
   // --- Settings ---
   const loadConfig = async () => {
-    const cfg = await invoke<AppConfig>("get_config");
-    setConfig(cfg);
-    configRef.current = cfg;
-  };
-
-  const handleSaveConfig = async () => {
-    await invoke("set_config", { config });
-    configRef.current = config;
-    showToast("Settings saved");
-    setShowSettings(false);
-  };
-
-  // --- Export / Import ---
-  const handleExport = async () => {
     try {
-      const json = await invoke<string>("export_history");
-      const blob = new Blob([json], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `easy-copy-history-${new Date().toISOString().slice(0, 10)}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
-      showToast("History exported");
-    } catch (e) {
-      showToast(`Export failed: ${e}`, "error");
+      const cfg = await invoke<AppConfig>("get_config");
+      setConfig(cfg);
+      configRef.current = cfg;
+    } catch (err) {
+      showToast(friendlyError(err, "加载配置失败"), "error");
     }
   };
 
-  const handleImport = () => {
-    const input = document.createElement("input");
-    input.type = "file";
-    input.accept = ".json";
-    input.onchange = async (e) => {
-      const file = (e.target as HTMLInputElement).files?.[0];
-      if (!file) return;
-      try {
-        const text = await file.text();
-        const count = await invoke<number>("import_history", { json: text });
-        showToast(`Imported ${count} items`);
-        refresh();
-      } catch (err) {
-        showToast(`Import failed: ${err}`, "error");
-      }
-    };
-    input.click();
+  const handleSaveConfig = async () => {
+    try {
+      await invoke("set_config", { config });
+      configRef.current = config;
+      showToast("设置已保存");
+      setShowSettings(false);
+    } catch (err) {
+      showToast(friendlyError(err, "保存失败"), "error");
+    }
   };
 
   // --- Context menu ---
@@ -782,7 +486,7 @@ function App() {
           {imageCache[item.id] ? (
             <img src={imageCache[item.id]} alt="clipboard image" onDoubleClick={() => openEnlargedImage(imageCache[item.id])} />
           ) : (
-            <span className="img-placeholder">Loading...</span>
+            <span className="img-placeholder">加载中…</span>
           )}
           <span className="item-desc">{item.content}</span>
         </div>
@@ -792,12 +496,18 @@ function App() {
     if (item.type === "Files") {
       const fileList = item.content.split("\n").filter((f) => f.trim().length > 0);
       const renderPath = (f: string) => {
-        const sep = f.lastIndexOf("\\");
-        const sep2 = f.lastIndexOf("/");
-        const idx = Math.max(sep, sep2);
-        if (idx > 0 && idx < f.length - 1) {
+        // Fix: original `Math.max(-1, -1)` would not render a separator for
+        // strings without path separators (e.g. "file.txt" → idx = -1).
+        // Now we only special-case the "no separator" path explicitly.
+        const sepBack = f.lastIndexOf("\\");
+        const sepFwd = f.lastIndexOf("/");
+        const idx = sepBack > sepFwd ? sepBack : sepFwd;
+        if (idx >= 0 && idx < f.length - 1) {
           const dir = f.substring(0, idx);
           const name = f.substring(idx + 1);
+          // The separator is the *last* one found, but `dir` was sliced up to
+          // `idx` (exclusive), so the separator char lives at index `idx` in
+          // the original string `f`.
           return <>{dir}{f[idx]}<span className="file-basename">{name}</span></>;
         }
         return <span className="file-basename">{f}</span>;
@@ -811,7 +521,7 @@ function App() {
               <div
                 key={i}
                 className={`file-name clickable-path ${exec ? "is-exec" : ""}`}
-                title={exec ? `⚠ Executable — Ctrl+Click to open: ${f}` : `Ctrl+Click to open: ${f}`}
+                title={exec ? `⚠ 可执行文件 — Ctrl+点击打开：${f}` : `Ctrl+点击打开：${f}`}
                 onClick={(e) => { if (!e.ctrlKey) return; handleOpenFile(f, e); }}
               >
                 {exec && <span className="exec-indicator">⚠</span>}
@@ -820,7 +530,7 @@ function App() {
             );
           })}
           {fileList.length > 5 && (
-            <div className="file-more">+{fileList.length - 5} more</div>
+            <div className="file-more">还有 {fileList.length - 5} 个</div>
           )}
         </div>
       );
@@ -842,7 +552,9 @@ function App() {
               onClick={(e) => {
                 e.stopPropagation();
                 if (e.ctrlKey) {
-                  invoke("open_url", { url: part.trim() });
+                  invoke("open_url", { url: part.trim() }).catch((err) =>
+                    showToast(friendlyError(err, "打开失败"), "error")
+                  );
                 } else {
                   handleCopy(item.id);
                 }
@@ -853,11 +565,11 @@ function App() {
                   e.preventDefault();
                   e.stopPropagation();
                   invoke("open_url", { url: part.trim() })
-                    .then(() => showToast(`Opened: ${part.trim()}`, "success"))
-                    .catch((err) => showToast(`Failed: ${err}`, "error"));
+                    .then(() => showToast(`已打开：${part.trim()}`, "success"))
+                    .catch((err) => showToast(friendlyError(err, "打开失败"), "error"));
                 }
               }}
-              title={`Click to copy · Ctrl+Click / Ctrl+RightClick to open: ${part}`}
+              title={`点击复制 · Ctrl+点击 / Ctrl+右键打开：${part}`}
             >
               {part}
             </span>
@@ -878,25 +590,25 @@ function App() {
             ref={searchInputRef}
             className="search-input"
             type="text"
-            placeholder="Search history & tags..."
+            placeholder="搜索历史与标签..."
             value={search}
             onChange={(e) => handleSearch(e.target.value)}
             autoFocus
           />
         </div>
         {items.length > 0 && (
-          <button className="clear-btn" onClick={() => setClearConfirm(true)} title="Clear all">
+          <button className="clear-btn" onClick={() => setClearConfirm(true)} title="清空所有">
             <IconTrash />
           </button>
         )}
         <button
           className={`toolbar-btn ${incognito ? "active-incognito" : ""}`}
           onClick={handleToggleIncognito}
-          title="Toggle incognito mode"
+          title="切换隐身模式"
         >
           <IconIncognito />
         </button>
-        <button className="toolbar-btn" onClick={() => { loadConfig(); setShowSettings(true); }} title="Settings">
+        <button className="toolbar-btn" onClick={() => { loadConfig(); setShowSettings(true); }} title="设置">
           <IconSettings />
         </button>
       </div>
@@ -904,8 +616,8 @@ function App() {
       <div className="list-container">
         {items.length === 0 ? (
           <div className="empty-state">
-            <p>No clipboard items yet.</p>
-            <p className="hint">Copy something to get started!</p>
+            <p>暂无剪贴板内容</p>
+            <p className="hint">复制任意内容即可开始记录</p>
           </div>
         ) : (
           <div className="item-list">
@@ -949,13 +661,13 @@ function App() {
                   <button
                     className="delete-btn"
                     onClick={(e) => handleDelete(item.id, e)}
-                    title="Delete"
+                    title="删除"
                   >
                     <IconTrash />
                   </button>
                 </div>
                 {copiedId === item.id && (
-                  <div className="copied-badge">Copied!</div>
+                  <div className="copied-badge">已复制</div>
                 )}
               </div>
                   ))}
@@ -971,74 +683,58 @@ function App() {
           <button
             className={`autostart-btn ${autoStartEnabled ? "active" : ""}`}
             onClick={handleToggleAutoStart}
-            title="Toggle auto-start on boot"
+            title="开机自启"
           >
             <IconPower />
-            <span>{autoStartEnabled ? "ON" : "OFF"}</span>
+            <span>{autoStartEnabled ? "已开启" : "已关闭"}</span>
           </button>
           <button
             className="theme-btn"
             onClick={cycleTheme}
-            title={`Theme: ${themeMode} (click to switch)`}
+            title={`主题：${themeMode === 'auto' ? '自动' : themeMode === 'light' ? '浅色' : '深色'}（点击切换）`}
           >
             {themeMode === 'auto' ? <IconAuto /> : themeMode === 'light' ? <IconSun /> : <IconMoon />}
           </button>
           <button
             className="notes-btn"
-            onClick={async () => {
-              try {
-                await invoke("open_api_window");
-              } catch (e) {
-                showToast(`Failed: ${e}`, "error");
-              }
+            onClick={() => {
+              invoke("open_api_window").catch((e) => showToast(friendlyError(e, "打开 API 失败"), "error"));
             }}
-            title={`Open API (${config.api_shortcut})`}
+            title={`打开 API 窗口（${config.api_shortcut}）`}
           >
             <span>🌐 API</span>
           </button>
           <button
             className="notes-btn"
-            onClick={async () => {
-              try {
-                await invoke("open_notes_window");
-              } catch (e) {
-                showToast(`Failed: ${e}`, "error");
-              }
+            onClick={() => {
+              invoke("open_notes_window").catch((e) => showToast(friendlyError(e, "打开笔记失败"), "error"));
             }}
-            title={`Open Notes (${config.notes_shortcut})`}
+            title={`打开笔记（${config.notes_shortcut}）`}
           >
-            <span>📝 Notes</span>
+            <span>📝 笔记</span>
           </button>
           <button
             className="notes-btn"
-            onClick={async () => {
-              try {
-                await invoke("open_tools_window");
-              } catch (e) {
-                showToast(`Failed: ${e}`, "error");
-              }
+            onClick={() => {
+              invoke("open_tools_window").catch((e) => showToast(friendlyError(e, "打开工具失败"), "error"));
             }}
-            title="Open Dev Tools"
+            title="打开开发者工具"
           >
-            <span>🔧 Tools</span>
+            <span>🔧 工具</span>
           </button>
           <button
             className="notes-btn"
-            onClick={async () => {
-              try {
-                await invoke("trigger_screenshot");
-              } catch (e) {
-                showToast(`Failed: ${e}`, "error");
-              }
+            onClick={() => {
+              invoke("trigger_screenshot").catch((e) => showToast(friendlyError(e, "截图失败"), "error"));
             }}
-            title={`Take Screenshot (${config.screenshot_shortcut})`}
+            title={`截图（${config.screenshot_shortcut}）`}
           >
-            <span>📸 Screenshot</span>
+            <span>📸 截图</span>
           </button>
         </div>
         <div className="footer-info-group">
           <span className="footer-stats">
-            {stats.count} items{stats.size > 0 ? ` · ${formatSize(stats.size)}` : ""}
+            {stats.count} 条{stats.size > 0 ? ` · ${formatSize(stats.size)}` : ""}
           </span>
         </div>
       </div>
@@ -1074,9 +770,9 @@ function App() {
             }}
           />
           <div className="image-modal-controls" onClick={(e) => e.stopPropagation()}>
-            <button onClick={() => setImageZoom((z) => Math.min(5, z + 0.25))} title="Zoom in"><IconZoomIn /></button>
-            <button onClick={resetImageView} title="Reset"><IconZoomReset /></button>
-            <button onClick={() => setImageZoom((z) => Math.max(0.2, z - 0.25))} title="Zoom out"><IconZoomOut /></button>
+            <button onClick={() => setImageZoom((z) => Math.min(5, z + 0.25))} title="放大"><IconZoomIn /></button>
+            <button onClick={resetImageView} title="重置"><IconZoomReset /></button>
+            <button onClick={() => setImageZoom((z) => Math.max(0.2, z - 0.25))} title="缩小"><IconZoomOut /></button>
             <span className="zoom-label">{Math.round(imageZoom * 100)}%</span>
           </div>
         </div>
@@ -1106,14 +802,14 @@ function App() {
           <div className="preview-modal" onClick={(e) => e.stopPropagation()}>
             <div className="preview-header">
               <div className="preview-lang-picker">
-                <label htmlFor="preview-lang-select">View as</label>
+                <label htmlFor="preview-lang-select">预览为</label>
                 <select
                   id="preview-lang-select"
                   className="preview-lang-select"
                   value={lang}
                   onChange={(e) => setPreviewLang(e.target.value as PreviewLang)}
                   disabled={tooLong}
-                  title={tooLong ? 'Content too large — highlight disabled' : undefined}
+                  title={tooLong ? '内容过大，已禁用高亮' : undefined}
                 >
                   {PREVIEW_LANGUAGES.map((l) => (
                     <option key={l} value={l}>{l}</option>
@@ -1121,8 +817,8 @@ function App() {
                 </select>
               </div>
               <div className="preview-actions">
-                <button className="preview-btn" onClick={() => handleCopy(previewItem.id)} title="Copy"><IconCopy /></button>
-                <button className="preview-btn preview-close" onClick={() => setPreviewItem(null)} title="Close">×</button>
+                <button className="preview-btn" onClick={() => handleCopy(previewItem.id)} title="复制"><IconCopy /></button>
+                <button className="preview-btn preview-close" onClick={() => setPreviewItem(null)} title="关闭">×</button>
               </div>
             </div>
             <div className="preview-body">
@@ -1145,7 +841,7 @@ function App() {
               )}
             </div>
             <div className="preview-footer">
-              <span>{previewItem.content.length} chars · {formatTime(previewItem.timestamp)} · {lang}</span>
+              <span>{previewItem.content.length} 字 · {formatTime(previewItem.timestamp)} · {lang}</span>
             </div>
           </div>
         </div>
@@ -1156,20 +852,19 @@ function App() {
         <div className="modal-overlay" onClick={handleExecCancel}>
           <div className="exec-confirm-dialog" onClick={(e) => e.stopPropagation()}>
             <div className="exec-confirm-icon"><IconWarning /></div>
-            <h3 className="exec-confirm-title">Executable File Detected</h3>
+            <h3 className="exec-confirm-title">检测到可执行文件</h3>
             <p className="exec-confirm-desc">
-              You are about to open a potentially executable file. Running unknown
-              scripts can be dangerous. Are you sure?
+              你即将打开一个可能可执行的文件。运行未知脚本可能存在风险，是否继续？
             </p>
             <div className="exec-confirm-path" title={execConfirm.path}>
               {execConfirm.path}
             </div>
             <div className="exec-confirm-buttons">
               <button className="exec-btn-cancel" onClick={handleExecCancel}>
-                Cancel
+                取消
               </button>
               <button className="exec-btn-open" onClick={handleExecConfirm}>
-                Open Anyway
+                仍要打开
               </button>
             </div>
           </div>
@@ -1180,17 +875,16 @@ function App() {
         <div className="modal-overlay" onClick={() => setClearConfirm(false)}>
           <div className="exec-confirm-dialog" onClick={(e) => e.stopPropagation()}>
             <div className="exec-confirm-icon"><IconTrash /></div>
-            <h3 className="exec-confirm-title">Clear All History?</h3>
+            <h3 className="exec-confirm-title">清空全部历史？</h3>
             <p className="exec-confirm-desc">
-              This will permanently delete all clipboard history. This action
-              cannot be undone.
+              将永久删除所有剪贴板历史记录，此操作不可撤销。
             </p>
             <div className="exec-confirm-buttons">
               <button className="exec-btn-cancel" onClick={() => setClearConfirm(false)}>
-                Cancel
+                取消
               </button>
               <button className="exec-btn-open" onClick={handleClear}>
-                Clear All
+                全部清空
               </button>
             </div>
           </div>
@@ -1199,9 +893,9 @@ function App() {
 
       {undoToast && (
         <div className="undo-toast">
-          <span>Item deleted</span>
+          <span>已删除</span>
           <button onClick={handleUndoDelete}>
-            <IconUndo /> Undo
+            <IconUndo /> 撤销
           </button>
         </div>
       )}
@@ -1214,7 +908,7 @@ function App() {
             style={{ left: Math.min(contextMenu.x, window.innerWidth - 180), top: Math.min(contextMenu.y, window.innerHeight - 220) }}
           >
             <button className="ctx-item" onClick={() => { handleCopy(contextMenu.itemId); closeContextMenu(); }}>
-              <IconCopy /> Copy
+              <IconCopy /> 复制
             </button>
             {items.find(i => i.id === contextMenu.itemId)?.type === "Text" && (
               <button className="ctx-item" onClick={() => {
@@ -1222,7 +916,7 @@ function App() {
                 if (it) { setPreviewItem(it); setPreviewLang('text'); }
                 closeContextMenu();
               }}>
-                <IconText /> Preview
+                <IconText /> 预览
               </button>
             )}
             {items.find(i => i.id === contextMenu.itemId) && (
@@ -1233,19 +927,17 @@ function App() {
                   await invoke("create_note_from_clip", { clipId: id });
                   await refresh();
                   await invoke("open_notes_window");
-                  setToast({ msg: "已存为笔记", type: "success" });
-                  setTimeout(() => setToast(null), 1500);
+                  showToast("已存为笔记");
                 } catch (err) {
-                  setToast({ msg: String(err), type: "error" });
-                  setTimeout(() => setToast(null), 2000);
+                  showToast(friendlyError(err, "保存失败"), "error");
                 }
               }}>
-                <IconText /> {items.find(i => i.id === contextMenu.itemId)?.saved_as_note ? "✅ 已存为笔记" : "Save as Note"}
+                <IconText /> {items.find(i => i.id === contextMenu.itemId)?.saved_as_note ? "✅ 已存为笔记" : "存为笔记"}
               </button>
             )}
             <div className="ctx-divider" />
             <button className="ctx-item ctx-danger" onClick={() => { handleDelete(contextMenu.itemId, { stopPropagation: () => {} } as React.MouseEvent); closeContextMenu(); }}>
-              <IconTrash /> Delete
+              <IconTrash /> 删除
             </button>
           </div>
         </>
@@ -1254,10 +946,10 @@ function App() {
       {showSettings && (
         <div className="modal-overlay" onClick={() => setShowSettings(false)}>
           <div className="settings-dialog" onClick={(e) => e.stopPropagation()}>
-            <h3 className="settings-title">Settings</h3>
+            <h3 className="settings-title">设置</h3>
 
             <div className="settings-row">
-              <label className="settings-label">Max History Items</label>
+              <label className="settings-label">最大历史条数</label>
               <input
                 className="settings-input"
                 type="number"
@@ -1269,7 +961,7 @@ function App() {
             </div>
 
             <div className="settings-row">
-              <label className="settings-label">Poll Interval (ms)</label>
+              <label className="settings-label">轮询间隔 (毫秒)</label>
               <input
                 className="settings-input"
                 type="number"
@@ -1280,8 +972,20 @@ function App() {
               />
             </div>
 
+            <div className="settings-row settings-row-toggle">
+              <label className="settings-label" htmlFor="copy-on-dbl">双击复制</label>
+              <input
+                id="copy-on-dbl"
+                className="settings-checkbox"
+                type="checkbox"
+                checked={config.copy_on_double_click}
+                onChange={(e) => setConfig({ ...config, copy_on_double_click: e.target.checked })}
+              />
+              <span className="settings-hint">关闭后，双击文本条目会打开预览窗口而非直接复制</span>
+            </div>
+
             <div className="settings-row">
-              <label className="settings-label">Clipboard Shortcut</label>
+              <label className="settings-label">剪贴板快捷键</label>
               <input
                 className="settings-input"
                 type="text"
@@ -1292,7 +996,7 @@ function App() {
             </div>
 
             <div className="settings-row">
-              <label className="settings-label">Notes Shortcut</label>
+              <label className="settings-label">笔记快捷键</label>
               <input
                 className="settings-input"
                 type="text"
@@ -1303,7 +1007,7 @@ function App() {
             </div>
 
             <div className="settings-row">
-              <label className="settings-label">Tools Shortcut</label>
+              <label className="settings-label">工具快捷键</label>
               <input
                 className="settings-input"
                 type="text"
@@ -1314,7 +1018,7 @@ function App() {
             </div>
 
             <div className="settings-row">
-              <label className="settings-label">Screenshot Shortcut</label>
+              <label className="settings-label">截图快捷键</label>
               <input
                 className="settings-input"
                 type="text"
@@ -1325,7 +1029,7 @@ function App() {
             </div>
 
             <div className="settings-row">
-              <label className="settings-label">API Shortcut</label>
+              <label className="settings-label">API 快捷键</label>
               <input
                 className="settings-input"
                 type="text"
@@ -1336,12 +1040,12 @@ function App() {
             </div>
 
             <div className="settings-row">
-              <label className="settings-label">Storage Location</label>
+              <label className="settings-label">存储位置</label>
               <div className="settings-storage-row">
                 <input
                   className="settings-input"
                   type="text"
-                  placeholder="Default (OS app data dir)"
+                  placeholder="默认（系统应用数据目录）"
                   value={config.storage_root || ""}
                   onChange={(e) => setConfig({ ...config, storage_root: e.target.value || null })}
                 />
@@ -1352,31 +1056,31 @@ function App() {
                       const sel = await invoke<string>("select_folder");
                       if (sel) setConfig({ ...config, storage_root: sel });
                     } catch (e) {
-                      showToast(`Folder selection failed: ${e}`, "error");
+                      showToast(friendlyError(e, "选择文件夹失败"), "error");
                     }
                   }}
                 >
-                  Browse
+                  浏览
                 </button>
               </div>
-              <span className="settings-hint">Where clipboard history, notes, screenshots & API collections are saved. Leave empty for default.</span>
+              <span className="settings-hint">剪贴板历史、笔记、截图与 API 集合的保存位置。留空使用默认目录。</span>
             </div>
 
             <div className="settings-row">
-              <label className="settings-label">Data Management</label>
+              <label className="settings-label">数据管理</label>
               <div className="settings-buttons-row">
                 <button className="settings-action-btn" onClick={handleExport}>
-                  <IconExport /> Export
+                  <IconExport /> 导出
                 </button>
                 <button className="settings-action-btn" onClick={handleImport}>
-                  <IconImport /> Import
+                  <IconImport /> 导入
                 </button>
               </div>
             </div>
 
             <div className="settings-footer">
-              <button className="exec-btn-cancel" onClick={() => setShowSettings(false)}>Cancel</button>
-              <button className="exec-btn-open" onClick={handleSaveConfig}>Save</button>
+              <button className="exec-btn-cancel" onClick={() => setShowSettings(false)}>取消</button>
+              <button className="exec-btn-open" onClick={handleSaveConfig}>保存</button>
             </div>
           </div>
         </div>
