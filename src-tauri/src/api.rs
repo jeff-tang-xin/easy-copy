@@ -7,14 +7,36 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use crate::models::{ApiEnvironment, ApiNode, ApiNodeType, ApiRequest, ApiResponse, ApiState};
-use reqwest::cookie::Jar;
+use crate::models::{
+    ApiAuth, ApiEnvironment, ApiNode, ApiRequest, ApiResponse, ApiState,
+};
+use base64::Engine as _;
+use futures_util::StreamExt as _;
+use reqwest::cookie::{CookieStore as _, Jar};
+use reqwest::redirect::Policy;
 use reqwest::{header, Client, ClientBuilder, Method, Proxy};
 
-/// Maximum number of historical responses kept per request.
-pub const HISTORY_LIMIT: usize = 50;
+/// Total request timeout when the request doesn't specify one. reqwest itself
+/// has **no** default, which is why a request to a black-hole address used to
+/// hang the UI indefinitely with no way to cancel.
+pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
+
+/// Connect-phase timeout. Kept well below the total so a dead host fails fast
+/// instead of burning the whole budget on TCP.
+const CONNECT_TIMEOUT_SECS: u64 = 10;
+
+/// Hard cap on how many bytes of a response body we pull off the socket.
+///
+/// The previous implementation called `response.text()`, which buffers the
+/// *entire* body into memory before any truncation — a 2 GB download was an
+/// OOM. We now stream and stop reading once we cross this line.
+const MAX_BODY_BYTES: usize = 5 * 1024 * 1024;
+
+/// How much of the body we hand to the front-end as text. Larger than this and
+/// the renderer chokes; the full size is still reported via `body_size`.
+const MAX_BODY_TEXT_BYTES: usize = 512 * 1024;
 
 /// Manages API collections, environments, and request execution.
 /// Mirrors `NoteManager`'s pattern: single JSON file, in-memory `Arc<Mutex<...>>`.
@@ -25,7 +47,18 @@ pub struct ApiStore {
     /// settings panel) without forcing every other method through a lock.
     data_dir: std::sync::Mutex<Option<PathBuf>>,
     /// Shared cookie jar so successive calls in the same session persist cookies.
-    cookie_jar: Arc<Jar>,
+    ///
+    /// Wrapped in a `Mutex<Arc<..>>` rather than a bare `Arc` because `Jar` has
+    /// no "clear" API — `clear_cookies` swaps in a fresh jar instead.
+    cookie_jar_slot: Mutex<Arc<Jar>>,
+    /// Reusable clients keyed by the two settings that must be baked in at
+    /// build time: `(insecure_tls, follow_redirects)`.
+    ///
+    /// The previous code called `ClientBuilder::new().build()` inside `execute`,
+    /// so every single send threw away the connection pool and redid the TLS
+    /// handshake from scratch. Per-request timeouts don't need a new client —
+    /// `RequestBuilder::timeout` covers that.
+    clients: Mutex<HashMap<(bool, bool), Client>>,
 }
 
 impl ApiStore {
@@ -33,8 +66,16 @@ impl ApiStore {
         Self {
             state: Arc::new(Mutex::new(ApiState::default())),
             data_dir: std::sync::Mutex::new(data_dir),
-            cookie_jar: Arc::new(Jar::default()),
+            cookie_jar_slot: Mutex::new(Arc::new(Jar::default())),
+            clients: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn cookie_jar(&self) -> Arc<Jar> {
+        self.cookie_jar_slot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Update the data directory at runtime (used when the user changes
@@ -55,7 +96,12 @@ impl ApiStore {
             .map(|d| d.join("api_collections.json"))
     }
 
-    /// Load state from disk. Silently starts empty on any error.
+    /// Load state from disk.
+    ///
+    /// A corrupt file is **preserved** (renamed to `*.corrupt-<ts>`) rather
+    /// than silently ignored: the old behaviour returned early, leaving the
+    /// user with an apparently empty collection list, and then the next `save()`
+    /// overwrote the damaged-but-possibly-recoverable file with that emptiness.
     pub fn load(&self) {
         let path = match self.file_path() {
             Some(p) => p,
@@ -65,12 +111,28 @@ impl ApiStore {
             Ok(j) => j,
             Err(_) => return,
         };
-        if let Ok(loaded) = serde_json::from_str::<ApiState>(&json) {
-            *self.state.lock().unwrap_or_else(|e| e.into_inner()) = loaded;
+        match serde_json::from_str::<ApiState>(&json) {
+            Ok(loaded) => {
+                *self.state.lock().unwrap_or_else(|e| e.into_inner()) = loaded;
+            }
+            Err(e) => {
+                let stamp = chrono::Utc::now().timestamp_millis();
+                let backup = path.with_extension(format!("corrupt-{stamp}.json"));
+                let _ = fs::copy(&path, &backup);
+                eprintln!(
+                    "api_collections.json failed to parse ({e}); backed up to {}",
+                    backup.display()
+                );
+            }
         }
     }
 
-    /// Persist state to disk. Best-effort.
+    /// Persist state to disk atomically.
+    ///
+    /// Writes to a sibling temp file and renames over the target. A plain
+    /// `fs::write` truncates in place, so a crash or power loss mid-write left
+    /// a half-written JSON file — combined with the old silent-ignore `load()`,
+    /// that meant losing every saved request.
     fn save(&self) {
         let path = match self.file_path() {
             Some(p) => p,
@@ -80,8 +142,17 @@ impl ApiStore {
             let _ = fs::create_dir_all(parent);
         }
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        if let Ok(json) = serde_json::to_string_pretty(&state) {
-            let _ = fs::write(path, json);
+        let json = match serde_json::to_string_pretty(&state) {
+            Ok(j) => j,
+            Err(_) => return,
+        };
+        let tmp = path.with_extension("json.tmp");
+        if fs::write(&tmp, &json).is_err() {
+            return;
+        }
+        // `rename` over an existing file is atomic on NTFS and POSIX alike.
+        if fs::rename(&tmp, &path).is_err() {
+            let _ = fs::remove_file(&tmp);
         }
     }
 
@@ -149,137 +220,206 @@ impl ApiStore {
 
     // ── Variable expansion ──────────────────────────────────────
 
-    /// Expand `{{var_name}}` placeholders in `input` using the active env's vars.
-    /// Unknown placeholders are left untouched.
-    pub fn expand(&self, input: &str) -> String {
-        let (vars, active_id) = {
-            let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            let active = s.envs.iter().find(|e| Some(&e.id) == s.active_env_id.as_ref());
-            let map: HashMap<String, String> = match active {
-                Some(env) => env.vars.iter().cloned().collect(),
-                None => HashMap::new(),
-            };
-            (map, s.active_env_id.clone())
-        };
-        if active_id.is_none() {
-            return input.to_string();
+    /// Snapshot the active environment's vars once.
+    ///
+    /// `expand` used to lock the state mutex and clone the whole var map on
+    /// *every* call, and `execute` calls it once per URL, per header, per query
+    /// param and per form field — 20+ lock/clone cycles for one request.
+    /// Callers in the hot path take a snapshot and then use the free function
+    /// `expand_placeholders` directly.
+    fn env_snapshot(&self) -> HashMap<String, String> {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        match s.envs.iter().find(|e| Some(&e.id) == s.active_env_id.as_ref()) {
+            Some(env) => env.vars.iter().cloned().collect(),
+            None => HashMap::new(),
         }
-        expand_placeholders(input, &vars)
     }
 
+    /// Expand `{{var_name}}` placeholders in `input` using the active env's vars.
+    /// Unknown placeholders are left untouched.
     // ── Execution ───────────────────────────────────────────────
 
-    /// Execute an HTTP request, persist the response to history, return the response.
+    /// Execute an HTTP request and return the response.
+    ///
+    /// History is deliberately **not** written here. It used to be, via
+    /// `append_history`, which looked the node up by matching URL+method and
+    /// took the first hit — so with two requests sharing a URL the response
+    /// landed on the wrong one. Worse, the front-end also appended history
+    /// locally and then saved its own snapshot, silently reverting the backend
+    /// write. History is now owned by the front-end alone.
     pub async fn execute(&self, mut req: ApiRequest) -> ApiResponse {
         let started = Instant::now();
-        let orig_url = req.url.clone();
-        let orig_method = req.method.clone();
+        let mut warnings: Vec<String> = Vec::new();
 
-        // Expand URL and headers/body values.
-        req.url = self.expand(&req.url);
+        // One env snapshot for the whole request (see `env_snapshot`).
+        let vars = self.env_snapshot();
 
-        // Replace path variables (`:var` in URL). The boundary for a variable
-        // name is any of `/`, `?`, `#`, `:` or end-of-string — mirroring the
-        // front-end `extractPathVars` in ApiApp.tsx (regex
-        // `:[A-Za-z_][\p{L}\p{N}_.\-~]*` with the `u` flag) so a URL like
-        // `/api/:用户ID/users` correctly substitutes `用户ID` and doesn't
-        // bleed into the next segment. A naive `s.replace(":id", v)` would
-        // also match `:id2` with v="1" and corrupt the URL.
-        //
-        // The set of valid name characters on the front-end side already
-        // excludes the digits-as-first-character case (`:8080` is a port,
-        // not a variable), so we don't need a separate "first byte must be
-        // a letter" check here. Including `:` in the boundary set is the
-        // belt-and-braces that defends against a hand-edited
-        // `api_collections.json` whose `path_vars` contains a `:8080`-
-        // shaped name: the `:` between `:name` and the literal `8080`
-        // terminates the name match and prevents the port from being
-        // clobbered. (The same defence is also implicit on the front-end
-        // side because its regex requires `[A-Za-z_]` as the first char.)
-        for (k, v) in &req.path_vars {
-            let v = self.expand(v);
-            let needle = format!(":{}", k);
-            // Skip empty `k` to avoid a degenerate `:` needle that
-            // would match every colon in the URL. (An empty path-var
-            // name is meaningless and shouldn't be a key in
-            // `path_vars` to begin with, but a hand-edited JSON
-            // file could land us here.)
-            if k.is_empty() {
-                continue;
-            }
-            // We replace every occurrence whose suffix is a path/host delimiter
-            // (or end-of-string). Walking manually is O(n) per var and the
-            // inputs are short URLs, so this is fine.
-            let mut out = String::with_capacity(req.url.len());
-            let bytes = req.url.as_bytes();
-            let mut i = 0;
-            while i < bytes.len() {
-                if bytes[i..].starts_with(needle.as_bytes()) {
-                    let after = i + needle.len();
-                    // A path-var name ends at any of these delimiters. We
-                    // include `:` so a URL like `https://host:8080/...` does
-                    // NOT treat `:8080` as a path variable and silently
-                    // corrupt the port. (See the function-level comment
-                    // above for the full rationale and the front-end
-                    // contract this matches.)
-                    let is_boundary = after == bytes.len()
-                        || matches!(bytes[after], b'/' | b'?' | b'#' | b':');
-                    if is_boundary {
-                        out.push_str(&v);
-                        i = after;
-                        continue;
-                    }
-                }
-                // Push one UTF-8 char (req.url is &str so this is safe).
-                let ch = req.url[i..].chars().next().unwrap();
-                out.push(ch);
-                i += ch.len_utf8() as usize;
-            }
-            req.url = out;
-        }
+        // Expand URL, then substitute `:path_vars`.
+        req.url = expand_placeholders(&req.url, &vars);
+        let path_vars: Vec<(String, String)> = req
+            .path_vars
+            .iter()
+            .map(|(k, v)| (k.clone(), expand_placeholders(v, &vars)))
+            .collect();
+        req.url = substitute_path_vars(&req.url, &path_vars);
 
         let expanded_headers: Vec<(String, String)> = req
             .headers
             .iter()
-            .map(|(k, v)| (k.clone(), self.expand(v)))
+            .map(|(k, v)| (k.clone(), expand_placeholders(v, &vars)))
             .collect();
 
         let method = Method::from_bytes(req.method.to_uppercase().as_bytes())
             .unwrap_or(Method::GET);
 
-        let mut builder = ClientBuilder::new()
-            .cookie_provider(self.cookie_jar.clone())
-            .danger_accept_invalid_certs(true); // A3: SSL skip
+        let timeout = Duration::from_secs(req.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS).max(1));
+        let redirect_policy = if req.follow_redirects {
+            Policy::limited(10)
+        } else {
+            Policy::none()
+        };
+        if req.insecure_tls {
+            warnings.push(
+                "TLS 证书校验已按请求配置关闭，此请求的流量可被中间人解密".to_string(),
+            );
+        }
 
-        // A3: optional proxy — read PROXY env or skip. We expose none in this build.
-        if let Ok(p) = std::env::var("EASY_COPY_HTTP_PROXY") {
-            if !p.is_empty() {
-                if let Ok(proxy) = Proxy::all(&p) {
-                    builder = builder.proxy(proxy);
+
+
+        // Reuse a client per (tls, redirect) combination so the connection pool
+        // and TLS session cache actually survive between sends.
+        let client: Client = {
+            let key = (req.insecure_tls, req.follow_redirects);
+            let cached = self
+                .clients
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&key)
+                .cloned();
+            match cached {
+                Some(c) => c,
+                None => {
+                    let mut builder = ClientBuilder::new()
+                        .cookie_provider(self.cookie_jar())
+                        .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+                        .redirect(redirect_policy)
+                        // Opt-in per request now. This used to be
+                        // unconditionally `true` for every request.
+                        .danger_accept_invalid_certs(req.insecure_tls);
+
+                    // Optional proxy from the environment. Kept as-is, but a
+                    // malformed value is now reported rather than silently
+                    // ignored (a debugging tool must never quietly bypass the
+                    // proxy the user thinks it is using).
+                    if let Ok(p) = std::env::var("EASY_COPY_HTTP_PROXY") {
+                        if !p.is_empty() {
+                            match Proxy::all(&p) {
+                                Ok(proxy) => builder = builder.proxy(proxy),
+                                Err(e) => warnings
+                                    .push(format!("代理配置无效，已直连: {p} ({e})")),
+                            }
+                        }
+                    }
+
+                    match builder.build() {
+                        Ok(c) => {
+                            self.clients
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .insert(key, c.clone());
+                            c
+                        }
+                        Err(e) => {
+                            return error_response(
+                                started,
+                                format!("HTTP 客户端初始化失败: {e}"),
+                                warnings,
+                            )
+                        }
+                    }
                 }
             }
-        }
-        let client: Client = match builder.build() {
-            Ok(c) => c,
-            Err(e) => return error_response(&req, started, format!("client build: {e}")),
         };
 
-        let mut request = client.request(method, &req.url);
+        // Per-request timeout goes on the request, not the client, so the
+        // cached client stays shared.
+        let mut request = client.request(method, &req.url).timeout(timeout);
         for (k, v) in &expanded_headers {
-            // Try to parse common headers; otherwise append raw.
-            if let (Ok(name), Ok(value)) = (
+            // A header that reqwest refuses used to vanish without a trace,
+            // which is how "I definitely set Authorization" bugs happen.
+            // Surface it as a warning attached to the response instead.
+            if k.trim().is_empty() {
+                continue;
+            }
+            match (
                 header::HeaderName::from_bytes(k.as_bytes()),
                 header::HeaderValue::from_str(v),
             ) {
-                request = request.header(name, value);
+                (Ok(name), Ok(value)) => request = request.header(name, value),
+                (Err(_), _) => {
+                    warnings.push(format!("请求头名称非法，已跳过: {k}"));
+                }
+                (_, Err(_)) => {
+                    warnings.push(format!(
+                        "请求头 {k} 的值含非法字符（如换行或非 ASCII），已跳过"
+                    ));
+                }
+            }
+        }
+
+        // Declarative auth → header/query. Applied after explicit headers so an
+        // Auth tab selection wins over a stale hand-written header.
+        let mut auth_query: Vec<(String, String)> = Vec::new();
+        match &req.auth {
+            ApiAuth::None => {}
+            ApiAuth::Bearer { token } => {
+                let token = expand_placeholders(token, &vars);
+                if token.trim().is_empty() {
+                    warnings.push("Bearer 认证已选择但 token 为空".to_string());
+                } else {
+                    match header::HeaderValue::from_str(&format!("Bearer {token}")) {
+                        Ok(v) => request = request.header(header::AUTHORIZATION, v),
+                        Err(_) => warnings.push("Bearer token 含非法字符".to_string()),
+                    }
+                }
+            }
+            ApiAuth::Basic { username, password } => {
+                let u = expand_placeholders(username, &vars);
+                let p = expand_placeholders(password, &vars);
+                let encoded =
+                    base64::engine::general_purpose::STANDARD.encode(format!("{u}:{p}"));
+                match header::HeaderValue::from_str(&format!("Basic {encoded}")) {
+                    Ok(v) => request = request.header(header::AUTHORIZATION, v),
+                    Err(_) => warnings.push("Basic 认证凭据含非法字符".to_string()),
+                }
+            }
+            ApiAuth::ApiKey { key, value, location } => {
+                let k = expand_placeholders(key, &vars);
+                let v = expand_placeholders(value, &vars);
+                if k.trim().is_empty() {
+                    warnings.push("API Key 认证已选择但键名为空".to_string());
+                } else if location == "query" {
+                    auth_query.push((k, v));
+                } else {
+                    match (
+                        header::HeaderName::from_bytes(k.as_bytes()),
+                        header::HeaderValue::from_str(&v),
+                    ) {
+                        (Ok(n), Ok(hv)) => request = request.header(n, hv),
+                        _ => warnings.push(format!("API Key 头 {k} 非法，已跳过")),
+                    }
+                }
             }
         }
 
         // Append query params.
-        if !req.query.is_empty() {
-            let qp: Vec<(String, String)> = req.query.iter()
-                .map(|(k, v)| (k.clone(), self.expand(v)))
-                .collect();
+        let mut qp: Vec<(String, String)> = req
+            .query
+            .iter()
+            .map(|(k, v)| (k.clone(), expand_placeholders(v, &vars)))
+            .collect();
+        qp.extend(auth_query);
+        if !qp.is_empty() {
             request = request.query(&qp);
         }
 
@@ -288,7 +428,7 @@ impl ApiStore {
         match bt {
             "raw" => {
                 let content = req.body.as_deref().unwrap_or("");
-                let content = self.expand(content);
+                let content = expand_placeholders(content, &vars);
                 let ct = match req.body_raw_lang.as_str() {
                     "json" => "application/json",
                     "xml" => "application/xml",
@@ -297,7 +437,13 @@ impl ApiStore {
                     "html" => "text/html",
                     _ => "text/plain",
                 };
-                request = request.header("content-type", ct);
+                // Don't clobber an explicit Content-Type from the headers tab.
+                let has_explicit_ct = expanded_headers
+                    .iter()
+                    .any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
+                if !has_explicit_ct {
+                    request = request.header("content-type", ct);
+                }
                 if !content.is_empty() {
                     request = request.body(content);
                 }
@@ -305,27 +451,45 @@ impl ApiStore {
             "form-data" => {
                 let mut form = reqwest::multipart::Form::new();
                 for f in &req.form_data {
-                    let key = self.expand(&f.key);
+                    let key = expand_placeholders(&f.key, &vars);
                     if f.field_type == "file" {
-                        if let Some(path) = &f.file_path {
-                            if let Ok(bytes) = fs::read(path) {
-                                let file_name = f.file_name.clone()
-                                    .or_else(|| {
-                                        std::path::Path::new(path)
-                                            .file_name()
-                                            .map(|n| n.to_string_lossy().into_owned())
-                                    });
-                                let part = reqwest::multipart::Part::bytes(bytes);
-                                let part = if let Some(name) = file_name {
-                                    part.file_name(name)
-                                } else {
-                                    part
-                                };
-                                form = form.part(key, part);
+                        let path = match &f.file_path {
+                            Some(p) if !p.trim().is_empty() => p,
+                            _ => {
+                                return error_response(
+                                    started,
+                                    format!("form-data 字段 {key} 是文件类型但未选择文件"),
+                                    warnings,
+                                );
                             }
-                        }
+                        };
+                        // A read failure used to be swallowed by `if let Ok`,
+                        // so the request went out *missing the part* and the
+                        // user saw an inexplicable 400 from the server.
+                        let bytes = match fs::read(path) {
+                            Ok(b) => b,
+                            Err(e) => {
+                                return error_response(
+                                    started,
+                                    format!("读取上传文件失败 ({path}): {e}"),
+                                    warnings,
+                                );
+                            }
+                        };
+                        let file_name = f.file_name.clone().or_else(|| {
+                            std::path::Path::new(path)
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                        });
+                        let part = reqwest::multipart::Part::bytes(bytes);
+                        let part = if let Some(name) = file_name {
+                            part.file_name(name)
+                        } else {
+                            part
+                        };
+                        form = form.part(key, part);
                     } else {
-                        let value = self.expand(&f.value);
+                        let value = expand_placeholders(&f.value, &vars);
                         form = form.text(key, value);
                     }
                 }
@@ -333,44 +497,62 @@ impl ApiStore {
             }
             "urlencoded" => {
                 let params: Vec<(String, String)> = req.url_encoded.iter()
-                    .map(|(k, v)| (k.clone(), self.expand(v)))
+                    .map(|(k, v)| (k.clone(), expand_placeholders(v, &vars)))
                     .collect();
                 request = request.form(&params);
             }
-            "binary" => {
-                if let Some(path) = &req.binary_file {
-                    if let Ok(bytes) = fs::read(path) {
-                        request = request.header("content-type", "application/octet-stream");
-                        request = request.body(bytes);
+            "binary" | "msgpack" => {
+                let (path_opt, ct) = if bt == "binary" {
+                    (&req.binary_file, "application/octet-stream")
+                } else {
+                    (&req.msgpack_file, "application/msgpack")
+                };
+                let path = match path_opt {
+                    Some(p) if !p.trim().is_empty() => p,
+                    _ => {
+                        return error_response(
+                            started,
+                            format!("body 类型为 {bt} 但未选择文件"),
+                            warnings,
+                        );
                     }
-                }
-            }
-            "msgpack" => {
-                if let Some(path) = &req.msgpack_file {
-                    if let Ok(bytes) = fs::read(path) {
-                        request = request.header("content-type", "application/msgpack");
-                        request = request.body(bytes);
+                };
+                let bytes = match fs::read(path) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        return error_response(
+                            started,
+                            format!("读取请求体文件失败 ({path}): {e}"),
+                            warnings,
+                        );
                     }
-                }
+                };
+                request = request.header("content-type", ct).body(bytes);
             }
             _ => {
                 // "none" or legacy: fall back to raw body text if present.
                 if let Some(body) = &req.body {
                     if !body.is_empty() {
-                        let body = self.expand(body);
+                        let body = expand_placeholders(body, &vars);
                         request = request.body(body);
                     }
                 }
             }
         }
 
-        let resp_result = request.send().await;
-        let response = match resp_result {
+        let response = match request.send().await {
             Ok(r) => r,
             Err(e) => {
-                let response = error_response(&req, started, format!("send: {e}"));
-                self.append_history(&orig_url, &orig_method, response.clone());
-                return response;
+                // Distinguish the timeout case explicitly — it's by far the
+                // most common failure and "send: ..." told the user nothing.
+                let msg = if e.is_timeout() {
+                    format!("请求超时（{} 秒），可在设置中调整超时时间", timeout.as_secs())
+                } else if e.is_connect() {
+                    format!("连接失败: {e}")
+                } else {
+                    format!("发送失败: {e}")
+                };
+                return error_response(started, msg, warnings);
             }
         };
 
@@ -381,49 +563,122 @@ impl ApiStore {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
             .collect();
-        let body_result = response.text().await;
-        let body = match body_result {
-            Ok(b) => Some(truncate(&b, 256 * 1024)),
-            Err(e) => Some(format!("<failed to read body: {e}>")),
+        let final_url = {
+            let u = response.url().to_string();
+            if u == req.url { None } else { Some(u) }
         };
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
 
-        let response = ApiResponse {
-            status: status.as_u16(),
-            status_text,
-            headers,
-            request_headers: expanded_headers.clone(),
-            body,
-            duration_ms: started.elapsed().as_millis() as u64,
-            timestamp: chrono::Utc::now().timestamp_millis(),
-            error: None,
-        };
-        self.append_history(&orig_url, &orig_method, response.clone());
-        response
-    }
-
-    fn append_history(&self, url: &str, method: &str, resp: ApiResponse) {
-        // Find the request node by matching URL+method.
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(node) = state.nodes.iter_mut().find(|n| {
-            n.node_type == ApiNodeType::Request
-                && n.request
-                    .as_ref()
-                    .map(|r| r.url == url && r.method == method)
-                    .unwrap_or(false)
-        }) {
-            if let Some(r) = node.request.as_mut() {
-                r.history.insert(0, resp);
-                if r.history.len() > HISTORY_LIMIT {
-                    r.history.truncate(HISTORY_LIMIT);
+        // Stream the body with a hard cap. `response.text()` buffered the whole
+        // payload before truncating, so a huge download was an OOM, and it also
+        // lossily UTF-8-decoded binary responses into mojibake.
+        let mut buf: Vec<u8> = Vec::new();
+        let mut truncated = false;
+        let mut total: u64 = 0;
+        let mut read_error: Option<String> = None;
+        {
+            let mut stream = response.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                match chunk {
+                    Ok(bytes) => {
+                        total += bytes.len() as u64;
+                        if buf.len() < MAX_BODY_BYTES {
+                            let room = MAX_BODY_BYTES - buf.len();
+                            if bytes.len() > room {
+                                buf.extend_from_slice(&bytes[..room]);
+                                truncated = true;
+                                // Stop pulling: we have all we're going to show.
+                                break;
+                            }
+                            buf.extend_from_slice(&bytes);
+                        } else {
+                            truncated = true;
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        read_error = Some(format!("读取响应体失败: {e}"));
+                        break;
+                    }
                 }
             }
         }
-        drop(state);
-        self.save();
+
+        let looks_binary = is_binary_content(&content_type, &buf);
+        let body = if looks_binary {
+            // Hand back base64 so the front-end can offer a download / hex view
+            // instead of rendering broken glyphs.
+            Some(base64::engine::general_purpose::STANDARD.encode(&buf))
+        } else {
+            let text = String::from_utf8_lossy(&buf).into_owned();
+            let capped = truncate(&text, MAX_BODY_TEXT_BYTES);
+            if capped.len() < text.len() {
+                truncated = true;
+            }
+            Some(capped)
+        };
+        if truncated {
+            warnings.push(format!(
+                "响应体过大，已截断显示（实际 {} 字节）",
+                total
+            ));
+        }
+
+        ApiResponse {
+            status: status.as_u16(),
+            status_text,
+            headers,
+            request_headers: expanded_headers,
+            body,
+            duration_ms: started.elapsed().as_millis() as u64,
+            timestamp: chrono::Utc::now().timestamp_millis(),
+            error: read_error,
+            warnings,
+            is_binary: looks_binary,
+            body_size: total,
+            truncated,
+            final_url,
+        }
+    }
+
+    /// Snapshot the cookies the shared jar currently holds for `url`.
+    ///
+    /// The jar has always been silently accumulating cookies across requests
+    /// with no way for the user to see or clear them — a debugging trap when a
+    /// stale session cookie makes a request behave differently than the same
+    /// request in a browser.
+    pub fn cookies_for(&self, url: &str) -> Vec<String> {
+        let parsed = match url.parse::<reqwest::Url>() {
+            Ok(u) => u,
+            Err(_) => return Vec::new(),
+        };
+        match self.cookie_jar().cookies(&parsed) {
+            Some(v) => v
+                .to_str()
+                .unwrap_or("")
+                .split(';')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Drop every cookie by swapping in a fresh jar.
+    ///
+    /// `Jar` exposes no clear API, so we replace the whole thing. Held behind
+    /// a `Mutex` because the client builder clones the `Arc` per request.
+    pub fn clear_cookies(&self) {
+        *self.cookie_jar_slot.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(Jar::default());
     }
 }
 
-fn error_response(_req: &ApiRequest, started: Instant, msg: String) -> ApiResponse {
+fn error_response(started: Instant, msg: String, warnings: Vec<String>) -> ApiResponse {
     ApiResponse {
         status: 0,
         status_text: "ERROR".into(),
@@ -433,7 +688,97 @@ fn error_response(_req: &ApiRequest, started: Instant, msg: String) -> ApiRespon
         duration_ms: started.elapsed().as_millis() as u64,
         timestamp: chrono::Utc::now().timestamp_millis(),
         error: Some(msg),
+        warnings,
+        is_binary: false,
+        body_size: 0,
+        truncated: false,
+        final_url: None,
     }
+}
+
+/// Decide whether a body should be treated as opaque bytes.
+///
+/// Two signals: an explicitly non-text `Content-Type`, or a NUL byte in the
+/// first few KB (no text format contains one, every binary format does).
+fn is_binary_content(content_type: &str, body: &[u8]) -> bool {
+    let ct = content_type.to_ascii_lowercase();
+    let ct = ct.split(';').next().unwrap_or("").trim();
+    if !ct.is_empty() {
+        let textual = ct.starts_with("text/")
+            || ct == "application/json"
+            || ct == "application/xml"
+            || ct == "application/javascript"
+            || ct == "application/x-www-form-urlencoded"
+            || ct.ends_with("+json")
+            || ct.ends_with("+xml");
+        if textual {
+            return false;
+        }
+        // Known-binary families short-circuit before we sniff.
+        if ct.starts_with("image/")
+            || ct.starts_with("audio/")
+            || ct.starts_with("video/")
+            || ct.starts_with("font/")
+            || ct == "application/octet-stream"
+            || ct == "application/pdf"
+            || ct == "application/zip"
+            || ct == "application/msgpack"
+            || ct == "application/protobuf"
+        {
+            return true;
+        }
+    }
+    let probe = &body[..body.len().min(8192)];
+    probe.contains(&0)
+}
+
+/// Substitute `:name` path variables in a URL.
+///
+/// This is the **production** implementation. It used to live inline in
+/// `execute` while the test module carried a hand-copied duplicate — so the
+/// tests could keep passing while the real code drifted. Single source now.
+///
+/// Boundary rule: a variable name ends at the first character that isn't a
+/// letter, digit, `_`, `.`, `-` or `~`. This is the exact dual of the
+/// front-end regex `:[A-Za-z_][\p{L}\p{N}_.\-~]*` in `ApiApp.tsx`. The old
+/// backend rule only accepted `/ ? # :` and end-of-string as boundaries, so a
+/// URL like `/api/:id=1` or `/x/:id&y` never got substituted and the literal
+/// `:id` was sent to the server.
+///
+/// `https://host:8080/p` is safe without a special case: `8080` starts with a
+/// digit, and a caller's `path_vars` key would have to literally be `8080` to
+/// match — which the front-end can't produce.
+fn substitute_path_vars(url: &str, path_vars: &[(String, String)]) -> String {
+    fn is_name_char(c: char) -> bool {
+        c.is_alphanumeric() || matches!(c, '_' | '.' | '-' | '~')
+    }
+
+    let mut out = url.to_string();
+    for (k, v) in path_vars {
+        // An empty key would make the needle a bare `:`, matching every colon
+        // in the URL (including the scheme separator).
+        if k.is_empty() {
+            continue;
+        }
+        let needle = format!(":{k}");
+        let mut result = String::with_capacity(out.len());
+        let mut rest = out.as_str();
+        while let Some(pos) = rest.find(&needle) {
+            let after = &rest[pos + needle.len()..];
+            let boundary = after.chars().next().map_or(true, |c| !is_name_char(c));
+            result.push_str(&rest[..pos]);
+            if boundary {
+                result.push_str(v);
+            } else {
+                // Partial match (`:id` inside `:identifier`) — keep it verbatim.
+                result.push_str(&needle);
+            }
+            rest = after;
+        }
+        result.push_str(rest);
+        out = result;
+    }
+    out
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -558,6 +903,25 @@ pub async fn api_execute(
     Ok(store.execute(request).await)
 }
 
+/// List the cookies the shared jar holds for a URL.
+///
+/// The jar was previously invisible: it accumulated session cookies across
+/// requests with no UI to inspect or reset them, so a stale cookie could make
+/// an identical request behave differently than in a browser.
+#[tauri::command]
+pub async fn api_list_cookies(
+    url: String,
+    store: tauri::State<'_, Arc<ApiStore>>,
+) -> Result<Vec<String>, String> {
+    Ok(store.cookies_for(&url))
+}
+
+#[tauri::command]
+pub async fn api_clear_cookies(store: tauri::State<'_, Arc<ApiStore>>) -> Result<(), String> {
+    store.clear_cookies();
+    Ok(())
+}
+
 // ============================================================
 // Unit tests for file-private helpers in api.rs.
 //
@@ -570,6 +934,7 @@ pub async fn api_execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::ApiNodeType;
     use std::collections::HashMap;
 
     fn vars(pairs: &[(&str, &str)]) -> HashMap<String, String> {
@@ -782,44 +1147,20 @@ mod tests {
     // `u` flag). A mismatch here means a URL like `/api/:用户ID/...`
     // gets extracted on the UI but never substituted on the
     // back-end — the request goes out as a literal `:用户ID` and
-    // the server 404s. These tests directly exercise the loop in
-    // `execute` via a small in-process reimplementation, so we can
-    // validate the boundary/empty-key logic without spinning up
-    // reqwest.
+    // the server 404s. These tests exercise the **production**
+    // `substitute_path_vars` directly. They used to run against a
+    // hand-copied reimplementation living in this module, which meant
+    // the tests could stay green while the real code drifted — and it
+    // had drifted: the copy only accepted `/ ? # :` as terminators, so
+    // `/api/:id=1` was never substituted in production.
 
-    /// Reimplements the path-var substitution loop in `execute`,
-    /// factored out for unit testing. Mirrors the production code
-    /// line-for-line; if the production loop drifts, this test will
-    /// need to be updated alongside it (and that update is a
-    /// signal that the two-sided contract is changing).
-    fn substitute_path_vars(url: &str, path_vars: &[(&str, &str)]) -> String {
-        let mut url = url.to_string();
-        for (k, v) in path_vars {
-            if k.is_empty() {
-                continue;
-            }
-            let needle = format!(":{}", k);
-            let bytes = url.as_bytes();
-            let mut out = String::with_capacity(url.len());
-            let mut i = 0;
-            while i < bytes.len() {
-                if bytes[i..].starts_with(needle.as_bytes()) {
-                    let after = i + needle.len();
-                    let is_boundary = after == bytes.len()
-                        || matches!(bytes[after], b'/' | b'?' | b'#' | b':');
-                    if is_boundary {
-                        out.push_str(v);
-                        i = after;
-                        continue;
-                    }
-                }
-                let ch = url[i..].chars().next().unwrap();
-                out.push(ch);
-                i += ch.len_utf8() as usize;
-            }
-            url = out;
-        }
-        url
+    /// Adapter so the cases below can pass `&str` pairs.
+    fn subst(url: &str, vars: &[(&str, &str)]) -> String {
+        let owned: Vec<(String, String)> = vars
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        substitute_path_vars(url, &owned)
     }
 
     #[test]
@@ -829,19 +1170,17 @@ mod tests {
         // CJK name the moment the URL has `:用户ID` followed by a
         // structural delimiter — not silently drop it.
         let url = "/api/:用户ID/profile";
-        let got = substitute_path_vars(url, &[("用户ID", "42")]);
+        let got = subst(url, &[("用户ID", "42")]);
         assert_eq!(got, "/api/42/profile");
     }
 
     #[test]
     fn substitute_does_not_touch_a_port_colon() {
         // A URL like `https://api.example.com:8080/v1/users` contains
-        // a colon followed by digits. The port must be preserved
-        // even if a hand-edited `path_vars` happens to contain a
-        // name whose prefix would match. The `:` boundary check is
-        // what saves us.
+        // a colon followed by digits. The port must be preserved: the
+        // needle is `:port`, which simply doesn't occur in the URL.
         let url = "https://api.example.com:8080/v1/users";
-        let got = substitute_path_vars(url, &[("port", "9999")]);
+        let got = subst(url, &[("port", "9999")]);
         assert_eq!(got, url);
     }
 
@@ -852,7 +1191,7 @@ mod tests {
         // colon in the URL (a degenerate `:` needle that fires
         // anywhere). We bail before the loop even starts.
         let url = "https://api.example.com:8080/v1/users";
-        let got = substitute_path_vars(url, &[("", "X")]);
+        let got = subst(url, &[("", "X")]);
         assert_eq!(got, url);
     }
 
@@ -862,7 +1201,72 @@ mod tests {
         // replace the one we actually asked for. The scheme `https:`
         // and the port `:8080` are off-limits.
         let url = "https://api.example.com:8080/v1/users/:id";
-        let got = substitute_path_vars(url, &[("id", "42")]);
+        let got = subst(url, &[("id", "42")]);
         assert_eq!(got, "https://api.example.com:8080/v1/users/42");
+    }
+
+    #[test]
+    fn substitute_terminates_on_non_name_characters() {
+        // Regression for the old backend rule, which only treated
+        // `/ ? # :` and end-of-string as boundaries. `=`, `&` and `,`
+        // are all legal right after a path var, and the literal `:id`
+        // used to be sent to the server verbatim.
+        assert_eq!(subst("/api/:id=1", &[("id", "42")]), "/api/42=1");
+        assert_eq!(subst("/api/x?u=:id&v=2", &[("id", "42")]), "/api/x?u=42&v=2");
+        assert_eq!(subst("/api/:id,next", &[("id", "42")]), "/api/42,next");
+    }
+
+    #[test]
+    fn substitute_does_not_match_a_longer_name() {
+        // `:id` must not fire inside `:identifier` — otherwise the
+        // longer variable is corrupted into `42entifier`.
+        assert_eq!(
+            subst("/api/:identifier", &[("id", "42")]),
+            "/api/:identifier"
+        );
+    }
+
+    #[test]
+    fn substitute_replaces_every_occurrence() {
+        assert_eq!(
+            subst("/a/:id/b/:id", &[("id", "7")]),
+            "/a/7/b/7"
+        );
+    }
+
+    // ── Binary detection ────────────────────────────────────────
+    // Responses used to be forced through `text()`, so a PNG came
+    // back as mojibake. These pin the two signals we use.
+
+    #[test]
+    fn binary_detection_trusts_textual_content_types() {
+        // A NUL in a body that claims to be JSON is not our problem to
+        // reinterpret — the declared type wins for textual families.
+        assert!(!is_binary_content("application/json", b"{\"a\":1}"));
+        assert!(!is_binary_content("text/html; charset=utf-8", b"<html>"));
+        assert!(!is_binary_content("application/vnd.api+json", b"{}"));
+    }
+
+    #[test]
+    fn binary_detection_flags_known_binary_types() {
+        assert!(is_binary_content("image/png", b"\x89PNG"));
+        assert!(is_binary_content("application/octet-stream", b"abc"));
+        assert!(is_binary_content("application/pdf", b"%PDF-1.7"));
+    }
+
+    #[test]
+    fn binary_detection_sniffs_nul_when_type_is_unknown() {
+        // No/unhelpful Content-Type is common. A NUL byte appears in
+        // every binary format and no text format.
+        assert!(is_binary_content("", b"\x00\x01\x02"));
+        assert!(!is_binary_content("", b"plain text"));
+        assert!(is_binary_content("application/x-unknown", b"a\x00b"));
+    }
+
+    #[test]
+    fn binary_detection_handles_empty_body() {
+        // A 204 with no body must not panic the slice logic.
+        assert!(!is_binary_content("", b""));
+        assert!(!is_binary_content("application/json", b""));
     }
 }

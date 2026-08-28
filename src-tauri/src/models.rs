@@ -330,8 +330,69 @@ pub struct ApiRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_id: Option<String>,
     /// Most recent N (50) responses — newest first, capped via `history_limit`.
+    ///
+    /// NB: history is **owned by the front-end**. The backend never appends to
+    /// it during `execute`; it only round-trips whatever the front-end sends
+    /// via `api_save_node`. See the comment on `ApiStore::execute` for why the
+    /// previous backend-side `append_history` was removed (it matched nodes by
+    /// URL+method, so two requests sharing a URL got each other's history, and
+    /// the front-end's next save silently rolled the append back).
     #[serde(default)]
     pub history: Vec<ApiResponse>,
+
+    // ── Per-request transport options ───────────────────────────
+    /// Total request timeout in seconds. `None` falls back to
+    /// `DEFAULT_TIMEOUT_SECS`. A hung endpoint used to wedge the UI forever
+    /// because reqwest has no default timeout at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    /// Skip TLS certificate verification for this request only. Defaults to
+    /// `false`: the previous build hard-coded `danger_accept_invalid_certs(true)`
+    /// for *every* request, which silently exposed `Authorization` headers to
+    /// any MITM.
+    #[serde(default)]
+    pub insecure_tls: bool,
+    /// Follow 3xx redirects (up to 10 hops). Defaults to `true` via
+    /// `default_true` so existing collections keep working.
+    #[serde(default = "default_true")]
+    pub follow_redirects: bool,
+    /// Authentication helper. Expanded into an `Authorization` header at send
+    /// time so the user doesn't have to hand-roll base64 for Basic auth.
+    #[serde(default)]
+    pub auth: ApiAuth,
+}
+
+/// Declarative auth config, expanded into a header at send time.
+///
+/// Modelled as a tagged enum rather than a bag of optional strings so an
+/// invalid combination (e.g. bearer token *and* basic password) is
+/// unrepresentable.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ApiAuth {
+    /// No `Authorization` header added (any hand-written one still applies).
+    #[default]
+    None,
+    Bearer {
+        #[serde(default)]
+        token: String,
+    },
+    Basic {
+        #[serde(default)]
+        username: String,
+        #[serde(default)]
+        password: String,
+    },
+    /// API key sent either as a header or a query parameter.
+    ApiKey {
+        #[serde(default)]
+        key: String,
+        #[serde(default)]
+        value: String,
+        /// "header" or "query".
+        #[serde(default)]
+        location: String,
+    },
 }
 
 /// A single field in a form-data body (text or file).
@@ -371,6 +432,28 @@ pub struct ApiResponse {
     /// Error detail when the request failed (DNS, TLS, timeout, ...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+
+    /// Non-fatal problems detected while building or sending the request —
+    /// e.g. a header whose name/value reqwest refused, or an env placeholder
+    /// that had no value. These used to be swallowed entirely, producing the
+    /// classic "I definitely set that header" bug report.
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    /// True when the body was detected as non-text (by `Content-Type` or by
+    /// invalid UTF-8). The front-end renders a download/hex affordance instead
+    /// of dumping mojibake into a `<pre>`.
+    #[serde(default)]
+    pub is_binary: bool,
+    /// Size of the body actually received, in bytes, before truncation.
+    /// `body.len()` is not a substitute: it reflects the truncated text.
+    #[serde(default)]
+    pub body_size: u64,
+    /// True when `body` was cut short by the read cap.
+    #[serde(default)]
+    pub truncated: bool,
+    /// Final URL after redirects, when it differs from the requested one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_url: Option<String>,
 }
 
 /// Named environment holding a flat set of `{{var}}` substitutions.

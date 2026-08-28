@@ -1056,6 +1056,8 @@ pub fn run() {
             api_delete_env,
             api_set_active_env,
             api_execute,
+            api_list_cookies,
+            api_clear_cookies,
             select_folder,
             select_file
         ])
