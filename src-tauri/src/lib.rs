@@ -158,59 +158,198 @@ fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Look up geo/ASN info for an IP or domain via ip-api.com. When `target` is
-/// None/empty the caller's own public IP is returned (ip-api.com/json/).
+/// Why a provider lookup failed.
+///
+/// The distinction drives the fallback decision: retrying a second provider
+/// only helps for transport-level trouble. A rejected *query* (bad IP, unknown
+/// domain) will be rejected by every provider identically, so retrying just
+/// doubles the user's wait — up to 16s with two 8s timeouts — before showing
+/// the same message.
+#[derive(Debug)]
+enum LookupError {
+    /// The query itself is bad; the answer won't change elsewhere.
+    Invalid(String),
+    /// Network error, timeout, 5xx, or rate limit — worth another provider.
+    Transport(String),
+}
+
+impl LookupError {
+    fn message(self) -> String {
+        match self {
+            LookupError::Invalid(m) | LookupError::Transport(m) => m,
+        }
+    }
+}
+
+/// Look up geo/ASN info for an IP or domain. When `target` is None/empty the
+/// caller's own public IP is returned.
 /// Runs on the backend so the WebView isn't blocked by CSP / net permissions.
+/// Tries ipwho.is first, then freeipapi.com — both free over HTTPS, no key.
 #[tauri::command]
 async fn ip_lookup(target: Option<String>) -> Result<serde_json::Value, String> {
-    // Query ip-api.com (free, no key). ipapi.co returns 429/403 to packaged builds
-    // which is why lookup broke after `build`. Empty target = caller's own public IP.
-    let url = match target.as_deref().map(str::trim) {
-        Some(t) if !t.is_empty() => {
-            // Trim again after percent-encoding is skipped: ip-api rejects any
-            // trailing whitespace/newline as "invalid query". Use HTTPS so the
-            // lookup itself is private — a privacy tool sending the user's IP
-            // out over plaintext would be self-defeating.
-            format!("https://ip-api.com/json/{}", urlencoding_min(t.trim()))
-        }
-        _ => "https://ip-api.com/json/".to_string(),
+    // Trim once here so both providers get an identical, whitespace-free query:
+    // a trailing newline makes every geo API report "invalid query".
+    let query = target.as_deref().map(str::trim).unwrap_or("").to_string();
+
+    // Provider order matters. We deliberately do NOT use ip-api.com any more:
+    // its free endpoint is HTTP-only and answers HTTPS requests with
+    // `SSL unavailable for this endpoint, order a key at ...`, which is what
+    // broke this command. Downgrading to plaintext http:// would "fix" the
+    // error by leaking the user's own public IP over the wire — unacceptable
+    // for a privacy tool, so we switched to providers that speak HTTPS for
+    // free instead.
+    let primary = match ip_lookup_ipwhois(&query).await {
+        Ok(v) => return Ok(v),
+        // A bad query short-circuits: no point asking the backup the same thing.
+        Err(LookupError::Invalid(m)) => return Err(m),
+        Err(e) => e,
     };
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
-        .build()
-        .map_err(|e| format!("Client build failed: {}", e))?;
-    let resp = client
-        .get(&url)
+    // Transport failure — try the backup before giving up, since these free
+    // services rate-limit aggressively and one 429 shouldn't break the tool.
+    match ip_lookup_freeipapi(&query).await {
+        Ok(v) => Ok(v),
+        // Surface both causes: blaming only the primary hides "the backup is
+        // down too", which is exactly what you need when debugging offline.
+        Err(backup) => Err(format!(
+            "{} (backup provider also failed: {})",
+            primary.message(),
+            backup.message()
+        )),
+    }
+}
+
+/// Shared HTTP client for geo lookups.
+///
+/// Built once and reused: a per-call `Client` throws away the connection pool
+/// and the TLS session cache, so every lookup would pay a fresh handshake
+/// (and the fallback path would pay it twice).
+static IP_HTTP: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+fn ip_http() -> &'static reqwest::Client {
+    IP_HTTP.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(8))
+            .build()
+            // Falls back to the default client: builder() only fails on a
+            // broken TLS backend, where a per-call build would fail too.
+            .unwrap_or_default()
+    })
+}
+
+/// Shared HTTP GET + JSON decode for the geo providers.
+///
+/// Checks the status code before decoding: without this an HTML error page or
+/// a 429 body would be fed to the JSON parser and surface as a confusing
+/// "Parse failed: expected value" instead of the real cause.
+async fn ip_fetch_json(url: &str) -> Result<serde_json::Value, LookupError> {
+    let resp = ip_http()
+        .get(url)
         .header("User-Agent", "easy-copy/0.1")
         .send()
         .await
-        .map_err(|e| format!("Request failed: {}", e))?;
-    let raw = resp
-        .json::<serde_json::Value>()
+        .map_err(|e| LookupError::Transport(format!("Request failed: {}", e)))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let msg = format!("Lookup failed: HTTP {}", status.as_u16());
+        // 4xx (other than 429) means the provider rejected this query, so the
+        // backup would reject it too; everything else is worth a retry.
+        return Err(if status.is_client_error() && status.as_u16() != 429 {
+            LookupError::Invalid(msg)
+        } else {
+            LookupError::Transport(msg)
+        });
+    }
+    resp.json::<serde_json::Value>()
         .await
-        .map_err(|e| format!("Parse failed: {}", e))?;
+        .map_err(|e| LookupError::Transport(format!("Parse failed: {}", e)))
+}
 
-    // ip-api.com signals errors via `status: "fail"` + `message`.
-    if raw.get("status").and_then(|v| v.as_str()) == Some("fail") {
-        let msg = raw.get("message").and_then(|v| v.as_str()).unwrap_or("lookup failed");
-        return Err(format!("Lookup failed: {}", msg));
+/// Primary provider: ipwho.is — free, HTTPS, no API key, and returns ASN/org.
+async fn ip_lookup_ipwhois(query: &str) -> Result<serde_json::Value, LookupError> {
+    let url = if query.is_empty() {
+        "https://ipwho.is/".to_string()
+    } else {
+        format!("https://ipwho.is/{}", urlencoding_min(query))
+    };
+    let raw = ip_fetch_json(&url).await?;
+
+    // ipwho.is signals errors via `success: false` + `message`. Note this comes
+    // back with HTTP 200 even for a bogus query (verified: `/notanip` →
+    // 200 + {"success":false,"message":"404 not found"}), so the status check
+    // alone can't catch it.
+    if raw.get("success").and_then(serde_json::Value::as_bool) == Some(false) {
+        let msg = raw
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("lookup failed");
+        // Query-level rejection: the backup provider would say the same.
+        return Err(LookupError::Invalid(format!("Lookup failed: {}", msg)));
     }
 
-    // Normalise ip-api fields to the shape the frontend (IpInfo) expects.
-    let json = serde_json::json!({
-        "ip": raw.get("query"),
+    // ASN arrives as a bare number (15169); prefix it so the UI shows "AS15169".
+    let asn = raw
+        .get("connection")
+        .and_then(|c| c.get("asn"))
+        .and_then(serde_json::Value::as_i64)
+        .map(|n| format!("AS{}", n));
+
+    // Normalise to the shape the frontend (IpInfo) expects.
+    Ok(serde_json::json!({
+        "ip": raw.get("ip"),
         "city": raw.get("city"),
+        "region": raw.get("region"),
+        "country": raw.get("country_code"),
+        "country_name": raw.get("country"),
+        "postal": raw.get("postal"),
+        "latitude": raw.get("latitude"),
+        "longitude": raw.get("longitude"),
+        "timezone": raw.get("timezone").and_then(|t| t.get("id")),
+        "org": raw.get("connection").and_then(|c| c.get("org")),
+        "asn": asn,
+    }))
+}
+
+/// Backup provider: freeipapi.com — also free HTTPS without a key, but uses
+/// camelCase field names and has no `success` flag, so it needs its own mapper.
+async fn ip_lookup_freeipapi(query: &str) -> Result<serde_json::Value, LookupError> {
+    let url = if query.is_empty() {
+        "https://freeipapi.com/api/json".to_string()
+    } else {
+        format!("https://freeipapi.com/api/json/{}", urlencoding_min(query))
+    };
+    let raw = ip_fetch_json(&url).await?;
+
+    // No explicit error flag: a response without an address means "no data".
+    let ip = raw.get("ipAddress").and_then(|v| v.as_str()).unwrap_or("");
+    if ip.is_empty() {
+        return Err(LookupError::Invalid("Lookup failed: no data".to_string()));
+    }
+
+    // `timeZones` is an array; the first entry is the primary zone.
+    let timezone = raw
+        .get("timeZones")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .cloned();
+    let asn = raw
+        .get("asn")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("AS{}", s));
+
+    Ok(serde_json::json!({
+        "ip": raw.get("ipAddress"),
+        "city": raw.get("cityName"),
         "region": raw.get("regionName"),
         "country": raw.get("countryCode"),
-        "country_name": raw.get("country"),
-        "postal": raw.get("zip"),
-        "latitude": raw.get("lat"),
-        "longitude": raw.get("lon"),
-        "timezone": raw.get("timezone"),
-        "org": raw.get("org"),
-        "asn": raw.get("as"),
-    });
-    Ok(json)
+        "country_name": raw.get("countryName"),
+        "postal": raw.get("zipCode"),
+        "latitude": raw.get("latitude"),
+        "longitude": raw.get("longitude"),
+        "timezone": timezone,
+        "org": raw.get("asnOrganization"),
+        "asn": asn,
+    }))
 }
 
 #[tauri::command]
