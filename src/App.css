@@ -4,6 +4,28 @@
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+
+  /* ── Design tokens ──────────────────────────────────────────
+   * Radius, motion and mono-font were previously hardcoded ad hoc at
+   * 40+ call sites, drifting across 2/3/4/5/6/8/10/12px with no system
+   * behind them. That inconsistency — not the palette — is what made the
+   * UI read as dated: neighbouring controls simply didn't agree on their
+   * own shape. These live outside the theme blocks because geometry and
+   * timing don't change between light and dark; only color does. */
+  --radius-xs: 4px;   /* inline chips, search hits */
+  --radius-sm: 6px;   /* buttons, inputs */
+  --radius-md: 8px;   /* grouped controls */
+  --radius-lg: 12px;  /* panels, cards */
+  --radius-full: 999px;
+
+  /* A single easing for everything. Mixed `ease`/`linear`/default curves
+   * across a screen make motion feel uncoordinated. */
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --dur-fast: 0.12s;
+  --dur: 0.18s;
+
+  --font-mono: "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas,
+    "Courier New", monospace;
 }
 
 html[data-theme="dark"] {
@@ -25,10 +47,28 @@ html[data-theme="dark"] {
   --yellow: #e0af68;
   --danger-bg: rgba(247, 118, 142, 0.15);
   --danger-hover: rgba(247, 118, 142, 0.3);
+  --danger-border: rgba(247, 118, 142, 0.4);
+  --success-bg: rgba(158, 206, 106, 0.14);
+  --success-border: rgba(158, 206, 106, 0.32);
   --img-bg: #13101c;
   --scrollbar-track: #1a1b26;
   --scrollbar-thumb: #363b54;
   --scrollbar-hover: #414868;
+
+  /* Elevation. Dark themes can't lean on grey drop-shadows — they vanish
+   * against a dark canvas — so depth comes from a near-black shadow plus a
+   * 1px top highlight that reads as a lit edge. */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.5);
+  --inset-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  /* Focus ring, so every focusable control agrees on one treatment. */
+  --ring: 0 0 0 3px var(--accent-dim);
+  /* Subtle surface gradient for toolbars/headers. */
+  --surface-sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent);
+  --warn-bg: rgba(224, 175, 104, 0.22);
+  --warn-border: rgba(224, 175, 104, 0.45);
+  --warn-text: #e0af68;
   /* aliases for NotesApp */
   --bg: var(--bg-primary);
   --bg-elev: var(--bg-secondary);
@@ -58,10 +98,27 @@ html[data-theme="light"] {
   --yellow: #c99016;
   --danger-bg: rgba(214, 74, 94, 0.12);
   --danger-hover: rgba(214, 74, 94, 0.22);
+  --danger-border: rgba(214, 74, 94, 0.32);
+  --success-bg: rgba(58, 156, 90, 0.12);
+  --success-border: rgba(58, 156, 90, 0.3);
   --img-bg: #f0f0f4;
   --scrollbar-track: #eceef2;
   --scrollbar-thumb: #c8cdd8;
   --scrollbar-hover: #b0b6c4;
+
+  /* Light-mode elevation is tinted toward the palette's blue-grey rather
+   * than pure black; neutral-black shadows on white look muddy. */
+  --shadow-sm: 0 1px 2px rgba(44, 47, 58, 0.06);
+  --shadow-md: 0 4px 12px rgba(44, 47, 58, 0.08);
+  --shadow-lg: 0 12px 32px rgba(44, 47, 58, 0.12);
+  --inset-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  --ring: 0 0 0 3px var(--accent-dim);
+  --surface-sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.6), transparent);
+  --warn-bg: rgba(201, 144, 22, 0.18);
+  --warn-border: rgba(201, 144, 22, 0.4);
+  /* Darkened from the dark theme's #e0af68 — amber needs to go deeper than the
+   * surface tint to stay legible as text on a light background. */
+  --warn-text: #8a6100;
   /* aliases for NotesApp */
   --bg: var(--bg-primary);
   --bg-elev: var(--bg-secondary);
@@ -1042,7 +1099,7 @@ body {
 .ctx-header {
   padding: 6px 10px 8px;
   font-size: 11px;
-  color: var(--text-tertiary, var(--text-secondary));
+  color: var(--text-secondary);
   border-bottom: 1px solid var(--border-color);
   margin-bottom: 4px;
   overflow: hidden;
@@ -1161,8 +1218,8 @@ body {
 
 /* ===== Preview Modal ===== */
 .preview-modal {
-  background: var(--bg-panel, #1e1e1e);
-  color: var(--text, #e5e5e5);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
   width: min(80vw, 900px);
   max-height: 80vh;
   border-radius: 10px;
