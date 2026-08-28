@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { getCurrentWindow, LogicalSize, LogicalPosition } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { useTheme } from "./hooks/useTheme";
 import {
   IconCrop, IconRect, IconArrow, IconPen, IconText, IconMosaic,
   IconUndo, IconClear, IconPin, IconSticker, IconSave, IconCopy,
@@ -9,49 +10,6 @@ import {
 } from "./ScreenshotIcons";
 import "./App.css";
 import "./ScreenshotApp.css";
-
-/* =============================================================
- * Theme hook (shared pattern)
- * ============================================================= */
-function useTheme() {
-  const [themeMode, setThemeMode] = useState<"auto" | "light" | "dark">(
-    () =>
-      (localStorage.getItem("easy-copy-theme") as any) ||
-      (localStorage.getItem("theme") as any) ||
-      "auto"
-  );
-  const [systemDark, setSystemDark] = useState(
-    () => window.matchMedia("(prefers-color-scheme: dark)").matches
-  );
-  const theme = themeMode === "auto" ? (systemDark ? "dark" : "light") : themeMode;
-
-  useEffect(() => {
-    const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    const fn = (e: MediaQueryListEvent) => setSystemDark(e.matches);
-    mq.addEventListener("change", fn);
-    return () => mq.removeEventListener("change", fn);
-  }, []);
-
-  useEffect(() => {
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === "easy-copy-theme" && e.newValue) setThemeMode(e.newValue as any);
-    };
-    window.addEventListener("storage", onStorage);
-    const onFocus = () => {
-      const cur = localStorage.getItem("easy-copy-theme");
-      if (cur && cur !== themeMode) setThemeMode(cur as any);
-    };
-    window.addEventListener("focus", onFocus);
-    return () => {
-      window.removeEventListener("storage", onStorage);
-      window.removeEventListener("focus", onFocus);
-    };
-  }, [themeMode]);
-
-  useEffect(() => {
-    document.documentElement.setAttribute("data-theme", theme);
-  }, [theme]);
-}
 
 /* =============================================================
  * Types
@@ -291,6 +249,23 @@ export default function ScreenshotApp() {
       y: (e.clientY - rect.top) * sy,
     };
   }, []);
+
+  // In-app toast. Kept local (not a global store) because the screenshot
+  // overlay is a one-shot window — there is no other UI here to coordinate
+  // with, and a global event bus would just add wiring for no benefit.
+  const [appToast, setAppToast] = useState<{ msg: string; type: "success" | "error" } | null>(null);
+  const showAppToast = (msg: string, type: "success" | "error" = "success") => {
+    setAppToast({ msg, type });
+    window.setTimeout(() => setAppToast((cur) => (cur?.msg === msg ? null : cur)), 2500);
+  };
+
+  // Render-friendly message from a Rust/JS error. The raw payload often looks
+  // like "Error: io error: ..." or includes base64 — neither helps the user.
+  // Falls back to a short truncation so the toast stays single-line.
+  const friendly = (raw: unknown): string => {
+    const s = String(raw ?? "");
+    return s.length > 100 ? s.slice(0, 100) + "…" : s;
+  };
 
   // Listen for screenshot-captured event
   useEffect(() => {
@@ -1042,16 +1017,19 @@ export default function ScreenshotApp() {
     return off.toDataURL("image/png");
   };
 
-  // Save to file
   // Save to file, then close the overlay (the whole point is a quick capture).
+  // Errors surface through the in-app toast (showAppToast) rather than the
+  // native alert() so the message honours the user's theme and can stay
+  // visible long enough to read on multi-monitor setups.
   const handleSave = async () => {
     const dataUrl = exportDataUrl();
     if (!dataUrl) return;
     try {
-      await invoke<string>("save_screenshot", { dataUrl });
+      const path = await invoke<string>("save_screenshot", { dataUrl });
+      showAppToast(`已保存：${path}`, "success");
       await closeOverlay();
     } catch (e) {
-      alert(`Save failed: ${e}`);
+      showAppToast(`保存失败：${friendly(e)}`, "error");
     }
   };
 
@@ -1065,7 +1043,7 @@ export default function ScreenshotApp() {
       // instead of closing the overlay entirely.
       if (pinned) { enterPinnedMode(dataUrl); } else { await closeOverlay(); }
     } catch (e) {
-      alert(`Copy failed: ${e}`);
+      showAppToast(`复制失败：${friendly(e)}`, "error");
     }
   };
 
@@ -1401,9 +1379,23 @@ export default function ScreenshotApp() {
         )}
       </div>
 
-      {/* Selection hint (before a region is chosen) */}
+      {/* Selection hint (before a region is chosen).
+          Top line = primary gesture, bottom line = full keyboard cheatsheet
+          so the user doesn't have to hover every toolbar button to discover
+          Ctrl+Z / Ctrl+C / Ctrl+S / Ctrl+D / 1-5 / V / Enter / Esc. */}
       {!showToolbar && !textInput && (
-        <div className="sc-hint">拖拽鼠标框选区域 · 双击复制全屏 · Esc 取消</div>
+        <div className="sc-hint">
+          <div className="sc-hint-primary">拖拽鼠标框选区域 · 双击复制全屏 · Esc 取消</div>
+          <div className="sc-hint-keys">
+            <span><kbd>Enter</kbd>复制</span>
+            <span><kbd>Ctrl</kbd>+<kbd>Z</kbd>撤销</span>
+            <span><kbd>Ctrl</kbd>+<kbd>C</kbd>复制</span>
+            <span><kbd>Ctrl</kbd>+<kbd>S</kbd>保存</span>
+            <span><kbd>Ctrl</kbd>+<kbd>D</kbd>贴图</span>
+            <span><kbd>1</kbd>-<kbd>5</kbd>工具</span>
+            <span><kbd>V</kbd>选择</span>
+          </div>
+        </div>
       )}
 
       {/* Toolbar */}
@@ -1469,6 +1461,10 @@ export default function ScreenshotApp() {
         <button className="sc-tool-btn sc-copy-btn" onClick={handleCopy} title="复制到剪贴板 (Ctrl+C / Enter / 双击选区)"><IconCopy /></button>
         <button className="sc-tool-btn sc-cancel-btn" onClick={handleCancel} title="取消 (Esc)"><IconClose /></button>
       </div>
+      )}
+
+      {appToast && (
+        <div className={`toast toast-${appToast.type}`}>{appToast.msg}</div>
       )}
     </div>
   );

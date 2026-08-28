@@ -1,6 +1,9 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { useTheme } from "./hooks/useTheme";
+import { useToast } from "./hooks/useToast";
+import { friendlyError } from "./hooks/friendlyError";
 import ReactMarkdown from "react-markdown";
 import { renderToStaticMarkup } from "react-dom/server";
 import remarkGfm from "remark-gfm";
@@ -19,7 +22,78 @@ interface Note {
   updated_at: string;
 }
 
-const UNTITLED = "Untitled";
+const UNTITLED = "未命名";
+
+// PromptModal — app-themable text-input modal. Defined at module scope (not
+// inline inside NotesApp) so it isn't recreated on every render of the parent
+// — recreating a component mid-edit would unmount/remount it and discard
+// whatever the user has already typed.
+//
+// Used by category rename and any future askText() call sites. Kept inline
+// (not promoted to src/hooks/PromptModal.tsx) because NotesApp is the only
+// consumer today; lift it when a second window needs it.
+//
+// The `[onCancel]` dep is intentional even though onCancel is a new closure
+// on every parent render: re-registering the keydown listener on every
+// keystroke is cheaper than a ref dance, and the parent only re-renders while
+// the modal is open for state that's already changing (selectedCategory,
+// search, etc.) so the churn is bounded.
+function PromptModal({
+  title,
+  defaultValue,
+  onCancel,
+  onConfirm,
+}: {
+  title: string;
+  defaultValue: string;
+  onCancel: () => void;
+  onConfirm: (v: string) => void;
+}) {
+  const [val, setVal] = useState(defaultValue);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onCancel]);
+
+  return (
+    <div className="modal-overlay" onClick={onCancel}>
+      <div className="exec-confirm-dialog" onClick={(e) => e.stopPropagation()}>
+        <h3 className="exec-confirm-title">{title}</h3>
+        <input
+          ref={inputRef}
+          className="settings-input"
+          type="text"
+          value={val}
+          onChange={(e) => setVal(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && val.trim()) onConfirm(val);
+          }}
+          placeholder="请输入…"
+        />
+        <div className="exec-confirm-buttons">
+          <button className="exec-btn-cancel" onClick={onCancel}>取消</button>
+          <button
+            className="exec-btn-open"
+            disabled={!val.trim()}
+            onClick={() => onConfirm(val)}
+          >
+            确定
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function formatDate(iso: string): string {
   const d = new Date(iso);
@@ -34,55 +108,24 @@ export default function NotesApp() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [viewMode, setViewMode] = useState<"edit" | "split" | "preview">("edit");
-  const [toast, setToast] = useState<string | null>(null);
+  // Shared toast hook. Replaces a string-only local state; with useToast
+  // we also get a structured {msg, type} for CSS-driven success/error tinting
+  // and a unified de-dupe + auto-dismiss.
+  const { toast, showToast } = useToast();
+  const flashToast = useCallback((msg: string) => showToast(msg, "success"), [showToast]);
+  const errorToast = useCallback(
+    (msg: string) => showToast(msg, "error"),
+    [showToast],
+  );
   // null = All, '' = Uncategorized, others = strict match on category name
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   // Right-click menu for category rename/delete
   const [catMenu, setCatMenu] = useState<{ x: number; y: number; name: string } | null>(null);
   // Right-click menu for a note in the list
   const [noteMenu, setNoteMenu] = useState<{ x: number; y: number; id: string } | null>(null);
-  const [themeMode, setThemeMode] = useState<"auto" | "light" | "dark">(
-    () =>
-      (localStorage.getItem("easy-copy-theme") as any) ||
-      (localStorage.getItem("theme") as any) ||
-      "auto"
-  );
-  const [systemDark, setSystemDark] = useState(
-    () => window.matchMedia("(prefers-color-scheme: dark)").matches
-  );
-
-  const theme = themeMode === "auto" ? (systemDark ? "dark" : "light") : themeMode;
-
-  useEffect(() => {
-    const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    const fn = (e: MediaQueryListEvent) => setSystemDark(e.matches);
-    mq.addEventListener("change", fn);
-    return () => mq.removeEventListener("change", fn);
-  }, []);
-
-  // Sync theme when clipboard window updates the shared key
-  useEffect(() => {
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === "easy-copy-theme" && e.newValue) {
-        setThemeMode(e.newValue as any);
-      }
-    };
-    window.addEventListener("storage", onStorage);
-    // also re-read on focus (same-origin storage events don't fire in same tab)
-    const onFocus = () => {
-      const cur = localStorage.getItem("easy-copy-theme");
-      if (cur && cur !== themeMode) setThemeMode(cur as any);
-    };
-    window.addEventListener("focus", onFocus);
-    return () => {
-      window.removeEventListener("storage", onStorage);
-      window.removeEventListener("focus", onFocus);
-    };
-  }, [themeMode]);
-
-  useEffect(() => {
-    document.documentElement.setAttribute("data-theme", theme);
-  }, [theme]);
+  // Theme is centralised in ./hooks/useTheme. The shared hook keeps every
+  // window in sync when the user toggles it from the clipboard window.
+  useTheme();
 
   const loadNotes = useCallback(async () => {
     try {
@@ -94,9 +137,10 @@ export default function NotesApp() {
         return list[0]?.id ?? null;
       });
     } catch (e) {
-      console.error("list_notes failed", e);
+      // Backend failure while listing — surface it instead of swallowing.
+      errorToast(`加载笔记失败: ${friendlyError(e, "加载失败")}`);
     }
-  }, []);
+  }, [errorToast]);
 
   useEffect(() => {
     loadNotes();
@@ -189,6 +233,11 @@ export default function NotesApp() {
   const [draftContent, setDraftContent] = useState("");
   const [draftTags, setDraftTags] = useState<string[]>([]);
   const [draftCategory, setDraftCategory] = useState<string>("");
+  // Bound value of the tag-input field at the bottom of the editor header.
+  // Kept as a local `useState` rather than folded into `draftTags` so the
+  // input can hold the in-progress text (the not-yet-Enter'd value) without
+  // the dirty-buffer effect treating every keystroke as a tag mutation.
+  const [tagInput, setTagInput] = useState("");
   const lastLoadedId = useRef<string | null>(null);
 
   useEffect(() => {
@@ -213,26 +262,12 @@ export default function NotesApp() {
   const saveTimer = useRef<number | null>(null);
   const [saveState, setSaveState] = useState<"saved" | "saving" | "idle">("idle");
   const searchInputRef = useRef<HTMLInputElement>(null);
+  // Mirror of the content textarea used by the toolbar's wrap/insert helpers
+  // and the markdown keyboard shortcuts (Ctrl+B / Ctrl+I / Tab / list-enter).
+  // Without this, `textareaRef.current` in wrapSelection / insertAtLineStart
+  // would throw at runtime.
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Global shortcuts: Ctrl+N new, Ctrl+F focus search, Esc clear search
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.ctrlKey || e.metaKey) {
-        if (e.key.toLowerCase() === "n") { e.preventDefault(); handleNew(); }
-        else if (e.key.toLowerCase() === "f") {
-          e.preventDefault();
-          searchInputRef.current?.focus();
-          searchInputRef.current?.select();
-        }
-      } else if (e.key === "Escape" && document.activeElement === searchInputRef.current) {
-        setSearch("");
-        searchInputRef.current?.blur();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
   useEffect(() => {
     if (!selected) return;
     // Skip on the very first load of a note (no diff)
@@ -263,25 +298,24 @@ export default function NotesApp() {
           window.setTimeout(() => setSaveState("idle"), 1500);
         }
       } catch (e) {
-        console.error("update_note failed", e);
+        errorToast(friendlyError(e, "保存失败"));
         setSaveState("idle");
       }
     }, 400);
     return () => {
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
     };
-  }, [draftTitle, draftContent, draftTags, draftCategory, selected]);
+  }, [draftTitle, draftContent, draftTags, draftCategory, selected, errorToast]);
 
-  const flashToast = (msg: string) => {
-    setToast(msg);
-    window.setTimeout(() => setToast(null), 1500);
-  };
-
-  const handleNew = async () => {
+  // Create a fresh note. Wrapped in useCallback so the global keydown
+  // effect below can list it as a dependency without the listener being
+  // re-bound on every keystroke (each render of NotesApp would otherwise
+  // re-create `handleNew`, which the listener would then drop and re-attach).
+  const handleNew = useCallback(async () => {
     try {
       const created = await invoke<Note>("create_note", {
         input: {
-          title: "New note",
+          title: "未命名笔记",
           content: "",
           tags: [],
           category: selectedCategory && selectedCategory !== "" ? selectedCategory : null,
@@ -290,23 +324,61 @@ export default function NotesApp() {
       setNotes((prev) => [created, ...prev]);
       setSelectedId(created.id);
     } catch (e) {
-      console.error(e);
+      errorToast(friendlyError(e, "创建笔记失败"));
     }
-  };
+  }, [selectedCategory, errorToast]);
+
+  // Global shortcuts: Ctrl+N new, Ctrl+F focus search, Esc clear search.
+  // `handleNew` is a `useCallback` so this effect only re-binds when
+  // `selectedCategory` changes, not on every NotesApp render.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey) {
+        if (e.key.toLowerCase() === "n") { e.preventDefault(); handleNew(); }
+        else if (e.key.toLowerCase() === "f") {
+          e.preventDefault();
+          searchInputRef.current?.focus();
+          searchInputRef.current?.select();
+        }
+      } else if (e.key === "Escape" && document.activeElement === searchInputRef.current) {
+        setSearch("");
+        searchInputRef.current?.blur();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [handleNew]);
+
+  // Lightweight in-app confirm modal — avoids native window.confirm which
+  // looks out of place inside a Tauri WebView and can't be themed.
+  const [confirmModal, setConfirmModal] = useState<{ title: string; message: string; onConfirm: () => void } | null>(null);
+  const [promptModal, setPromptModal] = useState<{ title: string; defaultValue: string; onConfirm: (v: string) => void } | null>(null);
+  const ask = (opts: { title: string; message: string; onConfirm: () => void }) => setConfirmModal(opts);
+  const askText = (opts: { title: string; defaultValue: string; onConfirm: (v: string) => void }) => setPromptModal(opts);
 
   const handleDelete = async () => {
     if (!selected) return;
-    if (!confirm(`Delete "${selected.title || UNTITLED}"?`)) return;
-    try {
-      await invoke("delete_note", { id: selected.id });
-      setNotes((prev) => prev.filter((n) => n.id !== selected.id));
-      setSelectedId((prev) => {
-        const rest = notes.filter((n) => n.id !== prev);
-        return rest[0]?.id ?? null;
-      });
-    } catch (e) {
-      console.error(e);
-    }
+    ask({
+      title: "删除笔记",
+      message: `确认删除「${selected.title || UNTITLED}」？该操作无法撤销。`,
+      onConfirm: async () => {
+        setConfirmModal(null);
+        try {
+          await invoke("delete_note", { id: selected.id });
+          setNotes((prev) => {
+            const next = prev.filter((n) => n.id !== selected.id);
+            // Pick a new selection only if we just deleted the currently
+            // selected one. Use the *post-filter* list (not the stale closure
+            // value of `notes`) so the new selectedId actually exists in state.
+            setSelectedId((cur) => (cur === selected.id ? (next[0]?.id ?? null) : cur));
+            return next;
+          });
+          flashToast("已删除");
+        } catch (e) {
+          errorToast(friendlyError(e, "删除失败"));
+        }
+      },
+    });
   };
 
   const handlePin = async () => {
@@ -315,7 +387,7 @@ export default function NotesApp() {
       await invoke("toggle_note_pin", { id: selected.id });
       await loadNotes();
     } catch (e) {
-      console.error(e);
+      errorToast(friendlyError(e, "置顶操作失败"));
     }
   };
 
@@ -323,9 +395,9 @@ export default function NotesApp() {
     if (!selected) return;
     try {
       await navigator.clipboard.writeText(selected.content);
-      flashToast("Copied");
+      flashToast("已复制");
     } catch (e) {
-      console.error(e);
+      errorToast(friendlyError(e, "复制失败"));
     }
   };
 
@@ -338,9 +410,9 @@ export default function NotesApp() {
   const copyNote = async (note: Note) => {
     try {
       await navigator.clipboard.writeText(note.content);
-      flashToast("Copied");
+      flashToast("已复制");
     } catch (e) {
-      console.error(e);
+      errorToast(friendlyError(e, "复制失败"));
     }
   };
 
@@ -349,30 +421,32 @@ export default function NotesApp() {
       await invoke("toggle_note_pin", { id });
       await loadNotes();
     } catch (e) {
-      console.error(e);
+      errorToast(friendlyError(e, "置顶操作失败"));
     }
   };
 
   const deleteNote = async (note: Note) => {
-    if (!confirm(`Delete "${note.title || UNTITLED}"?`)) return;
-    try {
-      await invoke("delete_note", { id: note.id });
-      setNotes((prev) => prev.filter((n) => n.id !== note.id));
-      if (selectedId === note.id) {
-        setSelectedId((prev) => {
-          const rest = notes.filter((n) => n.id !== prev);
-          return rest[0]?.id ?? null;
-        });
-      }
-    } catch (e) {
-      console.error(e);
-    }
+    ask({
+      title: "删除笔记",
+      message: `确认删除「${note.title || UNTITLED}」？该操作无法撤销。`,
+      onConfirm: async () => {
+        setConfirmModal(null);
+        try {
+          await invoke("delete_note", { id: note.id });
+          setNotes((prev) => {
+            const next = prev.filter((n) => n.id !== note.id);
+            // Same fix as handleDelete: pick the new selection from the
+            // post-filter list so it actually points to a note that still exists.
+            setSelectedId((cur) => (cur === note.id ? (next[0]?.id ?? null) : cur));
+            return next;
+          });
+          flashToast("已删除");
+        } catch (e) {
+          errorToast(friendlyError(e, "删除失败"));
+        }
+      },
+    });
   };
-
-  const [tagInput, setTagInput] = useState("");
-
-  // Shared textarea ref for toolbar formatting actions
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   // Wrap selected text with markdown markers (used by toolbar buttons + keyboard shortcuts)
   const wrapSelection = useCallback((left: string, right: string) => {
@@ -480,11 +554,11 @@ export default function NotesApp() {
     try {
       const innerHtml = renderToStaticMarkup(
         <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={(url) => url}>
-          {draftContent || "*Nothing to preview.*"}
+          {draftContent || "*暂无内容可预览。*"}
         </ReactMarkdown>,
       );
       const html = `<!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -520,10 +594,9 @@ ${innerHtml}
 </body>
 </html>`;
       await invoke("open_note_preview", { html });
-      flashToast("Opened in browser");
+      flashToast("已在浏览器中打开");
     } catch (e) {
-      console.error("open_note_preview failed", e);
-      flashToast(`Failed: ${e}`);
+      errorToast(friendlyError(e, "打开失败"));
     }
   };
 
@@ -535,34 +608,34 @@ ${innerHtml}
             <input
               ref={searchInputRef}
               className="notes-search"
-              placeholder="Search  (use #tag)…"
+              placeholder="搜索  (使用 #标签)…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Escape") setSearch(""); }}
             />
             {search && (
-              <button className="notes-search-clear" onClick={() => setSearch("")} title="Clear search (Esc)">✕</button>
+              <button className="notes-search-clear" onClick={() => setSearch("")} title="清空搜索 (Esc)">✕</button>
             )}
           </div>
-          <button className="notes-btn primary" onClick={handleNew} title="New note (Ctrl+N)">
+          <button className="notes-btn primary" onClick={handleNew} title="新建笔记 (Ctrl+N)">
             +
           </button>
         </div>
 
         <div className="side-section">
-          <h4>Categories</h4>
+          <h4>分类</h4>
           <div
             className={`cat-item ${selectedCategory === null ? "active" : ""}`}
             onClick={() => setSelectedCategory(null)}
           >
-            All
+            全部
             <span className="cat-count">{notes.length}</span>
           </div>
           <div
             className={`cat-item ${selectedCategory === "" ? "active" : ""}`}
             onClick={() => setSelectedCategory("")}
           >
-            Uncategorized
+            未分类
             <span className="cat-count">{notes.filter((n) => !n.category).length}</span>
           </div>
           {categories.map((c) => (
@@ -585,7 +658,7 @@ ${innerHtml}
 
         {allTags.length > 0 && (
           <div className="side-section">
-            <h4>Tags</h4>
+            <h4>标签</h4>
             <div className="tag-cloud">
               {allTags.slice(0, 40).map(([t, count]) => (
                 <span
@@ -597,7 +670,7 @@ ${innerHtml}
                       prev.split(/\s+/).includes(token) ? prev : (prev ? prev + " " : "") + token,
                     );
                   }}
-                  title={`${count} note${count > 1 ? "s" : ""}`}
+                  title={`${count} 条笔记`}
                 >
                   #{t}
                 </span>
@@ -609,7 +682,7 @@ ${innerHtml}
         <div className="notes-list">
           {filtered.length === 0 && (
             <div className="notes-empty">
-              {notes.length === 0 ? "No notes yet. Click + to create one." : "No matches."}
+              {notes.length === 0 ? "暂无笔记。点击 + 创建一条。" : "无匹配结果。"}
             </div>
           )}
           {filtered.map((n) => (
@@ -640,17 +713,17 @@ ${innerHtml}
           ))}
         </div>
         <div className="notes-list-status">
-          {filtered.length} note{filtered.length !== 1 ? "s" : ""}
+          {filtered.length} 条笔记
           {filtered.filter((n) => n.pinned).length > 0 &&
-            ` · ${filtered.filter((n) => n.pinned).length} pinned`}
+            ` · ${filtered.filter((n) => n.pinned).length} 条已置顶`}
         </div>
       </aside>
 
       <main className="notes-editor">
         {!selected ? (
           <div className="notes-blank">
-            <p>No note selected.</p>
-            <button className="notes-btn primary" onClick={handleNew}>Create a note</button>
+            <p>未选择任何笔记。</p>
+            <button className="notes-btn primary" onClick={handleNew}>新建一条笔记</button>
           </div>
         ) : (
           <>
@@ -663,17 +736,17 @@ ${innerHtml}
                   onChange={(e) => setDraftTitle(e.target.value)}
                 />
                 <span className={`notes-saved-hint ${saveState === "saved" ? "visible" : ""}`}>
-                  {saveState === "saving" ? "Saving…" : saveState === "saved" ? "✓ Saved" : ""}
+                  {saveState === "saving" ? "保存中…" : saveState === "saved" ? "✓ 已保存" : ""}
                 </span>
-                <div className="notes-view-segmented" role="group" aria-label="View mode">
+                <div className="notes-view-segmented" role="group" aria-label="视图模式">
                   {(["edit", "split", "preview"] as const).map((m) => (
                     <button
                       key={m}
                       className={`notes-seg-btn ${viewMode === m ? "active" : ""}`}
                       onClick={() => setViewMode(m)}
-                      title={`${m[0].toUpperCase()}${m.slice(1)} view`}
+                      title={m === "edit" ? "编辑视图" : m === "split" ? "分屏视图" : "预览视图"}
                     >
-                      {m === "edit" ? "Edit" : m === "split" ? "Split" : "Preview"}
+                      {m === "edit" ? "编辑" : m === "split" ? "分屏" : "预览"}
                     </button>
                   ))}
                 </div>
@@ -683,7 +756,7 @@ ${innerHtml}
                   className="cat-input"
                   list="note-cat-list"
                   value={draftCategory}
-                  placeholder="Category"
+                  placeholder="分类"
                   onChange={(e) => setDraftCategory(e.target.value)}
                 />
                 <datalist id="note-cat-list">
@@ -692,17 +765,17 @@ ${innerHtml}
                   ))}
                 </datalist>
                 <div className="notes-actions">
-                  <button className="notes-btn" onClick={handleOpenInBrowser} title="Open rendered note in default browser">
-                    Open ↗
+                  <button className="notes-btn" onClick={handleOpenInBrowser} title="在默认浏览器中打开渲染后的笔记">
+                    打开 ↗
                   </button>
-                  <button className="notes-btn" onClick={handlePin} title="Pin">
-                    {selected.pinned ? "Unpin" : "Pin"}
+                  <button className="notes-btn" onClick={handlePin} title="置顶">
+                    {selected.pinned ? "取消置顶" : "置顶"}
                   </button>
-                  <button className="notes-btn" onClick={handleCopy} title="Copy content">
-                    Copy
+                  <button className="notes-btn" onClick={handleCopy} title="复制内容">
+                    复制
                   </button>
-                  <button className="notes-btn danger" onClick={handleDelete} title="Delete">
-                    Delete
+                  <button className="notes-btn danger" onClick={handleDelete} title="删除">
+                    删除
                   </button>
                 </div>
               </div>
@@ -722,7 +795,7 @@ ${innerHtml}
               ))}
               <input
                 className="notes-tag-input"
-                placeholder="add tag ↵"
+                placeholder="添加标签 ↵"
                 value={tagInput}
                 onChange={(e) => setTagInput(e.target.value)}
                 onKeyDown={(e) => {
@@ -757,7 +830,7 @@ ${innerHtml}
               {viewMode !== "edit" && (
                 <div className="notes-preview markdown-body">
                   <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={(url) => url}>
-                    {draftContent || "*Nothing to preview.*"}
+                    {draftContent || "*暂无内容可预览。*"}
                   </ReactMarkdown>
                 </div>
               )}
@@ -766,7 +839,7 @@ ${innerHtml}
                   ref={textareaRef}
                   className="notes-textarea"
                   value={draftContent}
-                  placeholder="Write your notes here… (Markdown supported; Tab / Ctrl+B / Ctrl+I / Enter continue list)"
+                  placeholder="在此输入笔记…（支持 Markdown；Tab / Ctrl+B / Ctrl+I / Enter 继续列表）"
                   onChange={(e) => setDraftContent(e.target.value)}
                   onKeyDown={handleEditorKeyDown}
                   spellCheck={false}
@@ -775,13 +848,37 @@ ${innerHtml}
             </div>
 
             {selected.source_clip_id && (
-              <div className="notes-source">From clipboard item: {selected.source_clip_id.slice(0, 8)}…</div>
+              <div className="notes-source">来自剪贴板：{selected.source_clip_id.slice(0, 8)}…</div>
             )}
           </>
         )}
       </main>
 
-      {toast && <div className="notes-toast">{toast}</div>}
+      {toast && (
+        <div className={`toast toast-${toast.type}`}>{toast.msg}</div>
+      )}
+
+      {confirmModal && (
+        <div className="modal-overlay" onClick={() => setConfirmModal(null)}>
+          <div className="exec-confirm-dialog" onClick={(e) => e.stopPropagation()}>
+            <h3 className="exec-confirm-title">{confirmModal.title}</h3>
+            <p className="exec-confirm-desc">{confirmModal.message}</p>
+            <div className="exec-confirm-buttons">
+              <button className="exec-btn-cancel" onClick={() => setConfirmModal(null)}>取消</button>
+              <button className="exec-btn-open" onClick={confirmModal.onConfirm}>确认</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {promptModal && (
+        <PromptModal
+          title={promptModal.title}
+          defaultValue={promptModal.defaultValue}
+          onCancel={() => setPromptModal(null)}
+          onConfirm={(v) => { promptModal.onConfirm(v); }}
+        />
+      )}
 
       {noteMenu && (() => {
         const note = notes.find((n) => n.id === noteMenu.id);
@@ -795,13 +892,13 @@ ${innerHtml}
             >
               <div className="ctx-header" title={note.title || UNTITLED}>{note.title || UNTITLED}</div>
               <button className="ctx-item" onClick={() => { setNoteMenu(null); pinNote(note.id); }}>
-                {note.pinned ? "Unpin" : "Pin"}
+                {note.pinned ? "取消置顶" : "置顶"}
               </button>
               <button className="ctx-item" onClick={() => { setNoteMenu(null); copyNote(note); }}>
-                Copy
+                复制
               </button>
               <button className="ctx-item ctx-danger" onClick={() => { setNoteMenu(null); deleteNote(note); }}>
-                Delete
+                删除
               </button>
             </div>
           </>
@@ -815,44 +912,54 @@ ${innerHtml}
             className="context-menu"
             style={{ left: Math.min(catMenu.x, window.innerWidth - 200), top: Math.min(catMenu.y, window.innerHeight - 160) }}
           >
-            <div className="ctx-header" title={catMenu.name}>Category: {catMenu.name}</div>
+            <div className="ctx-header" title={catMenu.name}>分类：{catMenu.name}</div>
             <button className="ctx-item" onClick={async () => {
               const oldName = catMenu.name;
               setCatMenu(null);
-              const next = window.prompt(`Rename category "${oldName}" to:`, oldName);
-              if (next === null) return;
-              const trimmed = next.trim();
-              if (!trimmed || trimmed === oldName) return;
-              try {
-                const affected = await invoke<number>("rename_note_category", { from: oldName, to: trimmed });
-                await loadNotes();
-                if (selectedCategory === oldName) setSelectedCategory(trimmed);
-                setToast(`Renamed ${affected} note${affected === 1 ? "" : "s"}`);
-                setTimeout(() => setToast(null), 1500);
-              } catch (err) {
-                setToast(`Rename failed: ${err}`);
-                setTimeout(() => setToast(null), 2000);
-              }
+              askText({
+                title: "重命名分类",
+                defaultValue: oldName,
+                onConfirm: async (next) => {
+                  setPromptModal(null);
+                  const trimmed = next.trim();
+                  if (!trimmed) {
+                    errorToast("分类名不能为空");
+                    return;
+                  }
+                  if (trimmed === oldName) return;
+                  try {
+                    const affected = await invoke<number>("rename_note_category", { from: oldName, to: trimmed });
+                    await loadNotes();
+                    if (selectedCategory === oldName) setSelectedCategory(trimmed);
+                    flashToast(`已重命名 ${affected} 条笔记`);
+                  } catch (err) {
+                    errorToast(friendlyError(err, "重命名失败"));
+                  }
+                },
+              });
             }}>
-              Rename…
+              重命名…
             </button>
             <button className="ctx-item ctx-danger" onClick={async () => {
               const name = catMenu.name;
               setCatMenu(null);
-              const ok = window.confirm(`Delete category "${name}"? Notes under it will become uncategorized (notes are kept).`);
-              if (!ok) return;
-              try {
-                const affected = await invoke<number>("delete_note_category", { name });
-                await loadNotes();
-                if (selectedCategory === name) setSelectedCategory(null);
-                setToast(`Cleared category on ${affected} note${affected === 1 ? "" : "s"}`);
-                setTimeout(() => setToast(null), 1500);
-              } catch (err) {
-                setToast(`Delete failed: ${err}`);
-                setTimeout(() => setToast(null), 2000);
-              }
+              ask({
+                title: "删除分类",
+                message: `确认删除分类「${name}」？分类下的笔记会被保留，但分类字段会被清空。`,
+                onConfirm: async () => {
+                  setConfirmModal(null);
+                  try {
+                    const affected = await invoke<number>("delete_note_category", { name });
+                    await loadNotes();
+                    if (selectedCategory === name) setSelectedCategory(null);
+                    flashToast(`已清空 ${affected} 条笔记的分类`);
+                  } catch (err) {
+                    errorToast(friendlyError(err, "删除失败"));
+                  }
+                },
+              });
             }}>
-              Delete category
+              删除分类
             </button>
           </div>
         </>
