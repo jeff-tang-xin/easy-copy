@@ -483,18 +483,21 @@
   color: var(--text-primary);
   border: 1px solid var(--border-color);
   padding: 10px 12px;
-  border-radius: 8px;
-  font-family: "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
   font-size: 12px;
   resize: vertical;
   outline: none;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
-  line-height: 1.5;
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+  line-height: 1.6;
+  /* Tabs inside a payload should read as a small indent, not 8 columns. */
+  tab-size: 2;
+  box-shadow: var(--inset-highlight);
 }
 .api-body-textarea::placeholder { color: var(--text-muted); }
 .api-body-textarea:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-dim);
+  box-shadow: var(--ring);
 }
 
 /* ── Body Type Tabs + Raw Lang Bar ─────────────────────── */
@@ -504,6 +507,9 @@
   flex-direction: column;
   gap: 10px;
   flex: 1;
+  /* Children may overflow (long payloads); without this the flex item grows
+   * past the panel instead of scrolling internally. */
+  min-height: 0;
 }
 
 .api-body-types {
@@ -520,33 +526,239 @@
   color: var(--text-muted);
   cursor: pointer;
   padding: 4px 10px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   font-size: 12px;
-  transition: all 0.15s ease;
+  font-weight: 500;
+  transition: color var(--dur) var(--ease), background-color var(--dur) var(--ease),
+    border-color var(--dur) var(--ease);
 }
 .api-body-type:hover { color: var(--text-primary); background: var(--bg-hover); }
 .api-body-type.active { color: var(--accent); border-color: var(--accent); background: var(--accent-dim); }
+.api-body-type:focus-visible { outline: none; box-shadow: var(--ring); }
 
-.api-body-content { flex: 1; display: flex; flex-direction: column; gap: 8px; }
+.api-body-content { flex: 1; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
 
+/* Segmented control: one connected group instead of five loose pills. The
+ * shared border and internal dividers are what make it read as a single
+ * control, which is the modern convention for mutually-exclusive choices. */
 .api-raw-lang-bar {
-  display: flex;
-  gap: 2px;
+  display: inline-flex;
+  gap: 0;
   flex-wrap: wrap;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: 2px;
+  align-self: flex-start;
+  box-shadow: var(--inset-highlight);
 }
 
 .api-raw-lang {
   background: transparent;
-  border: 1px solid var(--border-color);
+  border: none;
   color: var(--text-muted);
   cursor: pointer;
-  padding: 3px 10px;
-  border-radius: 4px;
+  padding: 3px 11px;
+  border-radius: var(--radius-xs);
   font-size: 11px;
-  transition: all 0.15s ease;
+  font-weight: 500;
+  transition: color var(--dur) var(--ease), background-color var(--dur) var(--ease),
+    box-shadow var(--dur) var(--ease);
 }
 .api-raw-lang:hover { color: var(--text-primary); }
-.api-raw-lang.active { color: var(--accent); border-color: var(--accent); background: var(--accent-dim); }
+/* The active segment lifts off the trough with a real surface + shadow. */
+.api-raw-lang.active {
+  color: var(--accent);
+  background: var(--bg-secondary);
+  box-shadow: var(--shadow-sm);
+}
+.api-raw-lang:focus-visible { outline: none; box-shadow: var(--ring); }
+
+/* ── Raw body format toolbar ───────────────────────────── */
+
+.api-json-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 7px 9px;
+  /* A defined surface ties the toolbar to the editor below it instead of
+   * leaving buttons floating on the panel background. */
+  background: var(--bg-tertiary);
+  background-image: var(--surface-sheen);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+}
+
+/* Related actions (beautify 2 / 4 / minify) form one connected cluster so
+ * the eye groups them as "reformat" rather than three unrelated buttons. */
+.api-json-group {
+  display: inline-flex;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--bg-secondary);
+  box-shadow: var(--shadow-sm);
+}
+
+.api-json-group .api-json-btn {
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+}
+
+/* Hairline dividers between grouped buttons. */
+.api-json-group .api-json-btn + .api-json-btn {
+  border-left: 1px solid var(--border-color);
+}
+
+.api-json-btn {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  box-shadow: var(--shadow-sm);
+  transition: color var(--dur) var(--ease), border-color var(--dur) var(--ease),
+    background-color var(--dur) var(--ease), transform var(--dur-fast) var(--ease);
+}
+
+.api-json-btn:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+  border-color: var(--accent);
+}
+
+.api-json-btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.api-json-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+  border-color: var(--accent);
+}
+
+.api-json-btn.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+/* Not `pointer-events: none` — a disabled button still shows its `title`
+ * tooltip, which is how the user learns *why* it's unavailable. */
+.api-json-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Status reads as a pill so valid/invalid registers peripherally, by shape
+ * and colour, without having to read the text. */
+.api-json-status {
+  margin-left: auto;
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: var(--radius-full);
+  border: 1px solid transparent;
+  /* Tabular digits stop the line/column readout from shifting the pill's
+   * width as the caret moves through a malformed document. */
+  font-variant-numeric: tabular-nums;
+  /* Engine messages can be long; clamp to one line and let `title` carry the
+   * full text rather than letting the bar reflow to two rows. */
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: background-color var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+
+.api-json-status.is-valid {
+  color: var(--green);
+  background: var(--success-bg);
+  border-color: var(--success-border);
+}
+
+.api-json-status.is-invalid {
+  color: var(--red);
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+  cursor: help;
+}
+
+.api-json-status.is-idle {
+  color: var(--text-muted);
+}
+
+.api-json-hint { color: var(--text-muted); }
+.api-json-ok { color: var(--green); }
+.api-json-err { color: var(--red); cursor: help; }
+
+/* ── Body: source + tree side by side ──────────────────────
+ * The tree is permanent, not a toggle, so the two panes share a row and each
+ * takes half the width. `min-width: 0` on both is what lets a long unbroken
+ * payload scroll inside its pane instead of forcing the row wider.        */
+.api-body-split {
+  display: flex;
+  flex: 1;
+  gap: 10px;
+  align-items: stretch;
+  min-height: 0;
+}
+.api-body-split > * { min-width: 0; }
+/* Without a tree the textarea is the only child and takes the full width. */
+.api-body-split.has-tree > .api-body-textarea { flex: 1 1 50%; }
+
+/* Matches the textarea's min-height so the row keeps a stable height whether
+ * or not the payload currently parses. */
+.api-body-tree {
+  flex: 1 1 50%;
+  display: flex;
+  min-height: 180px;
+  max-height: 460px;
+  overflow: auto;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 8px 10px;
+  box-shadow: var(--inset-highlight);
+}
+
+/* Inside the pane the tree owns the surface, so drop its own frame to avoid a
+ * border-inside-a-border. */
+.api-body-tree .json-view,
+.api-body-tree .jv-raw {
+  border: none;
+  background: transparent;
+  border-radius: 0;
+  padding: 0;
+  max-height: none;
+}
+
+.api-body-tree-empty {
+  margin: auto;
+  padding: 0 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: center;
+  line-height: 1.7;
+}
+
+/* Panes stack on narrow windows — two 50% columns of monospace payload become
+ * unreadable well before the viewport gets truly small. */
+@media (max-width: 1100px) {
+  .api-body-split { flex-direction: column; }
+  .api-body-split.has-tree > .api-body-textarea,
+  .api-body-tree { flex: 1 1 auto; }
+}
 
 /* ── Tab badge dot (for body indicator) ────────────────── */
 
@@ -558,6 +770,55 @@
   margin-left: 4px;
   background: var(--accent);
   display: inline-block;
+}
+
+/* Warning-colored variant: flags that this request has TLS verification
+ * disabled, so the risk is visible without opening the settings tab. */
+.api-dot-warn {
+  background: var(--red);
+}
+
+/* ── Request settings (timeout / TLS) ───────────────────── */
+.api-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 12px 14px;
+}
+
+.api-setting-row {
+  display: grid;
+  grid-template-columns: 140px auto 1fr;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.api-setting-label {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.api-setting-input {
+  width: 90px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  color: var(--text-primary);
+  padding: 4px 8px;
+  font-size: 12px;
+  outline: none;
+}
+
+.api-setting-input:focus {
+  border-color: var(--accent);
+}
+
+.api-setting-hint {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 /* ── Hint ──────────────────────────────────────────────── */
@@ -820,6 +1081,53 @@
   cursor: not-allowed;
 }
 
+/* Row holding the view segmented-control plus the copy action. The copy
+ * button is deliberately *outside* .api-view-toggle: that container styles
+ * its children as one joined segmented control, so a non-toggle action
+ * placed inside inherited the wrong borders. */
+.api-body-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.api-copy-btn {
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px 12px;
+  font-size: 12px;
+  transition: all 0.15s ease;
+}
+.api-copy-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+/* Non-fatal backend warnings (unreadable upload file, dropped illegal
+ * header, truncated body, redirect notice). These were silently discarded
+ * before, so a request could fail for reasons nothing in the UI mentioned. */
+.api-warnings {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 16px 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--warn-border);
+  border-radius: var(--radius-md);
+  background: var(--warn-bg);
+}
+
+.api-warning-row {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--warn-text);
+  word-break: break-all;
+}
+
 .api-response-tabs {
   display: flex;
   gap: 0;
@@ -1031,13 +1339,13 @@
 }
 
 .api-moveto-item:hover {
-  background: var(--bg-hover, rgba(255, 255, 255, 0.06));
+  background: var(--bg-hover);
 }
 
 .api-moveto-item.api-moveto-selected {
-  background: var(--accent-color, #4a9eff);
+  background: var(--accent);
   color: #fff;
-  border-color: var(--accent-color, #4a9eff);
+  border-color: var(--accent);
 }
 
 .api-moveto-root {
