@@ -61,6 +61,15 @@ pub struct ApiStore {
     clients: Mutex<HashMap<(bool, bool), Client>>,
 }
 
+/// Everything one request needs from its bound environment, read under a
+/// single lock. Empty/default means "no env bound" — see `env_snapshot`.
+#[derive(Default)]
+struct EnvSnapshot {
+    vars: HashMap<String, String>,
+    base_url: String,
+    headers: Vec<(String, String)>,
+}
+
 impl ApiStore {
     pub fn new(data_dir: Option<PathBuf>) -> Self {
         Self {
@@ -166,15 +175,6 @@ impl ApiStore {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).envs.clone()
     }
 
-    pub fn active_env_id(&self) -> Option<String> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).active_env_id.clone()
-    }
-
-    pub fn set_active_env(&self, env_id: Option<String>) {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).active_env_id = env_id;
-        self.save();
-    }
-
     pub fn upsert_node(&self, node: ApiNode) -> ApiNode {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(existing) = state.nodes.iter_mut().find(|n| n.id == node.id) {
@@ -211,27 +211,38 @@ impl ApiStore {
     pub fn delete_env(&self, id: &str) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.envs.retain(|e| e.id != id);
-        if state.active_env_id.as_deref() == Some(id) {
-            state.active_env_id = None;
-        }
         drop(state);
         self.save();
     }
 
     // ── Variable expansion ──────────────────────────────────────
 
-    /// Snapshot the active environment's vars once.
+    /// Snapshot everything `execute` needs from **the request's own**
+    /// environment: vars, base URL and shared headers.
     ///
-    /// `expand` used to lock the state mutex and clone the whole var map on
-    /// *every* call, and `execute` calls it once per URL, per header, per query
-    /// param and per form field — 20+ lock/clone cycles for one request.
-    /// Callers in the hot path take a snapshot and then use the free function
-    /// `expand_placeholders` directly.
-    fn env_snapshot(&self) -> HashMap<String, String> {
+    /// Environments bind per request (`ApiRequest::env_id`), not globally.
+    /// A request with no `env_id`, or one pointing at a deleted env, simply
+    /// gets no env: placeholders stay literal, no base is prepended and no
+    /// shared headers are merged.
+    ///
+    /// All three come back from **one** lock acquisition. Two reasons:
+    /// `expand` used to lock and clone the whole var map on *every* call —
+    /// once per URL, per header, per query param, per form field, 20+
+    /// lock/clone cycles for a single request — and reading base/headers
+    /// separately could straddle an edit and mix a base from one env with
+    /// headers from another.
+    fn env_snapshot(&self, env_id: Option<&str>) -> EnvSnapshot {
+        let Some(env_id) = env_id else {
+            return EnvSnapshot::default();
+        };
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        match s.envs.iter().find(|e| Some(&e.id) == s.active_env_id.as_ref()) {
-            Some(env) => env.vars.iter().cloned().collect(),
-            None => HashMap::new(),
+        match s.envs.iter().find(|e| e.id == env_id) {
+            Some(env) => EnvSnapshot {
+                vars: env.vars.iter().cloned().collect(),
+                base_url: env.base_url.clone(),
+                headers: env.headers.clone(),
+            },
+            None => EnvSnapshot::default(),
         }
     }
 
@@ -251,11 +262,19 @@ impl ApiStore {
         let started = Instant::now();
         let mut warnings: Vec<String> = Vec::new();
 
-        // One env snapshot for the whole request (see `env_snapshot`).
-        let vars = self.env_snapshot();
+        // One snapshot of *this request's* env for the whole call (see
+        // `env_snapshot`). Binding is per request, so two requests sent back
+        // to back can legitimately resolve different envs.
+        let env = self.env_snapshot(req.env_id.as_deref());
+        let vars = env.vars;
 
-        // Expand URL, then substitute `:path_vars`.
+        // Expand URL, then prepend the env base, then substitute `:path_vars`.
+        //
+        // Order matters: the base join must happen *after* placeholder
+        // expansion, or a URL like `{{host}}/x` would still look relative at
+        // join time and get the base glued in front of its own host.
         req.url = expand_placeholders(&req.url, &vars);
+        req.url = join_base_url(&env.base_url, &req.url);
         let path_vars: Vec<(String, String)> = req
             .path_vars
             .iter()
@@ -263,11 +282,20 @@ impl ApiStore {
             .collect();
         req.url = substitute_path_vars(&req.url, &path_vars);
 
-        let expanded_headers: Vec<(String, String)> = req
+        // Request headers first, then merge in the env's shared ones. Both
+        // sides get placeholder expansion, so an env header may itself be
+        // written as `Bearer {{token}}`.
+        let own_headers: Vec<(String, String)> = req
             .headers
             .iter()
             .map(|(k, v)| (k.clone(), expand_placeholders(v, &vars)))
             .collect();
+        let env_headers: Vec<(String, String)> = env
+            .headers
+            .iter()
+            .map(|(k, v)| (k.clone(), expand_placeholders(v, &vars)))
+            .collect();
+        let expanded_headers = merge_env_headers(&env_headers, &own_headers);
 
         let method = Method::from_bytes(req.method.to_uppercase().as_bytes())
             .unwrap_or(Method::GET);
@@ -540,7 +568,72 @@ impl ApiStore {
             }
         }
 
-        let response = match request.send().await {
+        // Snapshot the *actual* headers by building the request first. The
+        // previous version recorded `expanded_headers` — the user-typed set —
+        // which silently omitted everything added afterwards: the Auth tab's
+        // Authorization, the body's Content-Type, plus the host / accept /
+        // user-agent / cookie headers reqwest fills in itself. A debugging
+        // tool showing a request that differs from the one on the wire is
+        // worse than showing nothing, so read them off the built request.
+        let built = match request.build() {
+            Ok(r) => r,
+            Err(e) => {
+                return error_response(started, format!("构建请求失败: {e}"), warnings);
+            }
+        };
+        let mut sent_headers: Vec<(String, String)> = built
+            .headers()
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.as_str().to_string(),
+                    // Non-UTF8 header values are legal on the wire; show a
+                    // lossy rendering rather than dropping the row.
+                    v.to_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|_| String::from_utf8_lossy(v.as_bytes()).into_owned()),
+                )
+            })
+            .collect();
+
+        // Cookies are attached by reqwest's cookie middleware during `execute`,
+        // i.e. after `build()`, so they are absent from the snapshot above.
+        // A stale jar cookie changing a response is exactly the case this tab
+        // exists to diagnose — add what the jar will send, unless the request
+        // already carries a hand-written Cookie header (which wins).
+        if !sent_headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("cookie"))
+        {
+            let jar_cookies = self.cookies_for(&req.url);
+            if !jar_cookies.is_empty() {
+                sent_headers.push(("cookie".to_string(), jar_cookies.join("; ")));
+            }
+        }
+
+        // hyper adds the transport-level headers while writing the request to
+        // the socket — they exist on neither the builder nor the built
+        // `Request`, so a request with no user headers would otherwise render
+        // an empty tab (which reads as "the tool is broken"). Reconstruct the
+        // ones whose values are fully determined by the request we just built,
+        // and mark them so nobody mistakes them for something they typed.
+        if let Some(host) = built.url().host_str() {
+            let authority = match built.url().port() {
+                // Only a non-default port appears in the Host header.
+                Some(p) => format!("{host}:{p}"),
+                None => host.to_string(),
+            };
+            add_implicit_header(&mut sent_headers, "host", &authority);
+        }
+        add_implicit_header(&mut sent_headers, "accept", "*/*");
+        // Set by the `gzip`/`brotli`/`deflate` features; reqwest asks for
+        // whatever it can transparently decode.
+        add_implicit_header(&mut sent_headers, "accept-encoding", "gzip, br, deflate");
+        if let Some(len) = built.body().and_then(|b| b.as_bytes()).map(<[u8]>::len) {
+            add_implicit_header(&mut sent_headers, "content-length", &len.to_string());
+        }
+
+        let response = match client.execute(built).await {
             Ok(r) => r,
             Err(e) => {
                 // Distinguish the timeout case explicitly — it's by far the
@@ -549,8 +642,19 @@ impl ApiStore {
                     format!("请求超时（{} 秒），可在设置中调整超时时间", timeout.as_secs())
                 } else if e.is_connect() {
                     format!("连接失败: {e}")
+                } else if e.is_builder() {
+                    // reqwest's Display for builder errors is the literal
+                    // string "builder error" — the actual cause (usually a
+                    // malformed URL) only lives in the source chain. A URL
+                    // with no scheme/host is the overwhelmingly common case,
+                    // so name it outright instead of leaking `url` internals.
+                    format!(
+                        "URL 无效: {}。请填写完整地址（含 http:// 或 https://），\
+                         若使用了 {{{{变量}}}} 请确认当前环境已激活且变量已定义",
+                        error_chain(&e)
+                    )
                 } else {
-                    format!("发送失败: {e}")
+                    format!("发送失败: {}", error_chain(&e))
                 };
                 return error_response(started, msg, warnings);
             }
@@ -633,7 +737,7 @@ impl ApiStore {
             status: status.as_u16(),
             status_text,
             headers,
-            request_headers: expanded_headers,
+            request_headers: sent_headers,
             body,
             duration_ms: started.elapsed().as_millis() as u64,
             timestamp: chrono::Utc::now().timestamp_millis(),
@@ -781,6 +885,39 @@ fn substitute_path_vars(url: &str, path_vars: &[(String, String)]) -> String {
     out
 }
 
+/// Record a header hyper will add at the transport layer.
+///
+/// These never appear on the built `Request`, so the "请求头" tab has to
+/// reconstruct them or show a misleading empty list. Anything the user (or an
+/// environment) set explicitly always wins: a hand-written `Host` override is
+/// precisely the kind of thing someone inspects this tab to confirm.
+fn add_implicit_header(headers: &mut Vec<(String, String)>, name: &str, value: &str) {
+    if headers.iter().any(|(k, _)| k.eq_ignore_ascii_case(name)) {
+        return;
+    }
+    headers.push((name.to_string(), value.to_string()));
+}
+
+/// Flatten an error and its `source()` chain into one line.
+///
+/// `reqwest::Error`'s `Display` is often a useless category label — a
+/// malformed URL renders as just "builder error", with the real reason
+/// ("relative URL without a base") buried one level down. Callers show
+/// this to users, so the chain is what actually matters.
+fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut parts = vec![e.to_string()];
+    let mut cur = e.source();
+    while let Some(s) = cur {
+        let text = s.to_string();
+        // reqwest sometimes repeats the parent's text verbatim.
+        if !parts.iter().any(|p| p == &text) {
+            parts.push(text);
+        }
+        cur = s.source();
+    }
+    parts.join(": ")
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
@@ -820,8 +957,93 @@ fn expand_placeholders(input: &str, vars: &HashMap<String, String>) -> String {
     out
 }
 
-fn find_close(bytes: &[u8]) -> Option<usize> {
-    let mut i = 0;
+/// Merge the active environment's shared headers with the request's own.
+///
+/// Rules, in order of precedence:
+///   1. **The request wins.** A header set on the request overrides the env's
+///      value for the same name — nearest definition wins, which is what the
+///      user sees in front of them when they hit Send.
+///   2. **Empty value means "drop it"** — but only when it actually shadows an
+///      env header. Writing the header name on the request with a blank value
+///      removes the inherited one instead of sending an empty header; without
+///      this there is no way to opt a single request out of an env-wide
+///      `Authorization`. A blank-valued header that shadows nothing is passed
+///      through untouched, preserving the pre-env behaviour.
+///   3. Env headers come first in the output so the inherited context reads
+///      before the request-specific overrides.
+///
+/// Name comparison is case-insensitive per RFC 7230; the request's spelling is
+/// the one that survives. Blank names are skipped on both sides.
+fn merge_env_headers(
+    env_headers: &[(String, String)],
+    req_headers: &[(String, String)],
+) -> Vec<(String, String)> {
+    let overridden: HashMap<String, String> = req_headers
+        .iter()
+        .filter(|(k, _)| !k.trim().is_empty())
+        .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.clone()))
+        .collect();
+
+    let env_names: std::collections::HashSet<String> = env_headers
+        .iter()
+        .filter(|(k, _)| !k.trim().is_empty())
+        .map(|(k, _)| k.trim().to_ascii_lowercase())
+        .collect();
+
+    let mut out: Vec<(String, String)> = Vec::with_capacity(env_headers.len() + req_headers.len());
+    for (k, v) in env_headers {
+        if k.trim().is_empty() {
+            continue;
+        }
+        // Skipped here when overridden; the request's own entry is appended
+        // below, so the value the user typed is the one that goes out.
+        if !overridden.contains_key(&k.trim().to_ascii_lowercase()) {
+            out.push((k.trim().to_string(), v.clone()));
+        }
+    }
+    for (k, v) in req_headers {
+        if k.trim().is_empty() {
+            continue;
+        }
+        // Rule 2: blank value is a deletion marker — but only against an env
+        // header. Shadowing nothing, it stays a plain (if odd) empty header,
+        // exactly as it behaved before environments could carry headers.
+        if v.trim().is_empty() && env_names.contains(&k.trim().to_ascii_lowercase()) {
+            continue;
+        }
+        out.push((k.clone(), v.clone()));
+    }
+    out
+}
+
+/// Join an environment base URL with a request URL.
+///
+/// Absolute request URLs (`http://`, `https://`) win outright — an explicit
+/// address in the URL bar must never be silently rewritten by whichever
+/// environment happens to be active. Everything else is treated as a path and
+/// appended to `base`.
+///
+/// The slash handling is deliberately tolerant: users type `{{host}}` values
+/// with and without a trailing slash, and paths with and without a leading
+/// one. Collapsing the seam here is what prevents the `orders//order-tracking`
+/// class of double-slash bugs.
+fn join_base_url(base: &str, url: &str) -> String {
+    let base = base.trim();
+    let url = url.trim();
+    if base.is_empty() {
+        return url.to_string();
+    }
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        return url.to_string();
+    }
+    if url.is_empty() {
+        return base.to_string();
+    }
+    format!("{}/{}", base.trim_end_matches('/'), url.trim_start_matches('/'))
+}
+
+fn find_close(bytes: &[u8]) -> Option<usize> {    let mut i = 0;
     while i + 1 < bytes.len() {
         if bytes[i] == b'}' && bytes[i + 1] == b'}' {
             return Some(i);
@@ -887,15 +1109,6 @@ pub fn api_delete_env(id: String, store: tauri::State<'_, Arc<ApiStore>>) -> Res
 }
 
 #[tauri::command]
-pub fn api_set_active_env(
-    env_id: Option<String>,
-    store: tauri::State<'_, Arc<ApiStore>>,
-) -> Result<(), String> {
-    store.set_active_env(env_id);
-    Ok(())
-}
-
-#[tauri::command]
 pub async fn api_execute(
     request: ApiRequest,
     store: tauri::State<'_, Arc<ApiStore>>,
@@ -922,6 +1135,247 @@ pub async fn api_clear_cookies(store: tauri::State<'_, Arc<ApiStore>>) -> Result
     Ok(())
 }
 
+/// Strip everything that could redirect the write outside the target folder.
+///
+/// `Content-Disposition` is attacker-controlled: a server can answer with
+/// `filename="../../autorun.inf"`. We only ever want the final component, so
+/// take the segment after the last separator and drop the characters Windows
+/// rejects in file names. Reserved device names (CON, PRN, ...) would still be
+/// refused by the OS, but they can't escape the directory, so a failed write is
+/// an acceptable outcome there.
+fn sanitize_filename(raw: &str) -> Option<String> {
+    let last = raw
+        .rsplit(|c| c == '/' || c == '\\' || c == ':')
+        .next()
+        .unwrap_or("");
+    let cleaned: String = last
+        .chars()
+        .filter(|c| !matches!(c, '<' | '>' | '"' | '|' | '?' | '*') && !c.is_control())
+        .collect();
+    let trimmed = cleaned.trim().trim_matches('.').trim();
+    // "." and ".." collapse to empty here, which is exactly what we want.
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Pull a file name out of a `Content-Disposition` header value.
+///
+/// Handles the two forms that appear in the wild:
+///   - `attachment; filename="report.xlsx"` (optionally unquoted)
+///   - `attachment; filename*=UTF-8''report%20final.xlsx` (RFC 5987)
+///
+/// The starred form wins when both are present, since that's the one carrying
+/// non-ASCII names. Percent-decoding is done by hand because the crate we'd
+/// normally reach for isn't a dependency here.
+fn filename_from_disposition(value: &str) -> Option<String> {
+    let mut plain: Option<String> = None;
+
+    for part in value.split(';') {
+        let part = part.trim();
+        let (key, val) = match part.split_once('=') {
+            Some(kv) => kv,
+            None => continue,
+        };
+        let key = key.trim().to_ascii_lowercase();
+        let val = val.trim();
+
+        if key == "filename*" {
+            // charset'language'percent-encoded-value
+            let encoded = val.rsplit('\'').next().unwrap_or(val);
+            if let Some(name) = sanitize_filename(&percent_decode(encoded)) {
+                return Some(name);
+            }
+        } else if key == "filename" && plain.is_none() {
+            let unquoted = val.trim_matches('"');
+            plain = sanitize_filename(unquoted);
+        }
+    }
+
+    plain
+}
+
+/// Minimal `%XX` decoder for RFC 5987 header values, UTF-8 aware.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Guess an extension from the MIME type for servers that send no
+/// `Content-Disposition` at all. Deliberately a short list: a wrong extension
+/// is worse than none, because Windows would then open the file with the wrong
+/// program.
+fn extension_for_mime(content_type: &str) -> Option<&'static str> {
+    let mime = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let ext = match mime.as_str() {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
+        "application/vnd.ms-excel" => "xls",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
+        "application/msword" => "doc",
+        "application/pdf" => "pdf",
+        "application/zip" | "application/x-zip-compressed" => "zip",
+        "application/gzip" => "gz",
+        "application/octet-stream" => "bin",
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/svg+xml" => "svg",
+        "text/csv" => "csv",
+        _ => return None,
+    };
+    Some(ext)
+}
+
+/// Decide the name to save a binary response under.
+///
+/// Priority: `Content-Disposition` → last path segment of the URL → a generic
+/// stem. An extension is appended from the MIME type only when the chosen name
+/// doesn't already carry one, so a server-provided `report.xlsx` is never
+/// mangled into `report.xlsx.bin`.
+fn suggest_download_name(
+    headers: &[(String, String)],
+    url: &str,
+    content_type: &str,
+) -> String {
+    let disposition = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-disposition"))
+        .and_then(|(_, v)| filename_from_disposition(v));
+
+    if let Some(name) = disposition {
+        return name;
+    }
+
+    // Fall back to the URL's last path segment, ignoring query and fragment.
+    let path_part = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('/');
+    let from_url = path_part
+        .rsplit('/')
+        .next()
+        .and_then(|s| sanitize_filename(s))
+        .filter(|s| !s.is_empty());
+
+    let stem = from_url.unwrap_or_else(|| "download".to_string());
+    let has_ext = std::path::Path::new(&stem)
+        .extension()
+        .is_some_and(|e| !e.is_empty());
+
+    match (has_ext, extension_for_mime(content_type)) {
+        (false, Some(ext)) => format!("{stem}.{ext}"),
+        _ => stem,
+    }
+}
+
+/// Starting folder for the save dialog. No `dirs` crate in the tree, so resolve
+/// the profile directory manually. Purely a convenience hint — we deliberately
+/// don't create it, because seeding a dialog is no reason to make folders on the
+/// user's disk.
+fn downloads_dir() -> Result<PathBuf, String> {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .map_err(|_| "找不到用户目录（USERPROFILE / HOME 均未设置）".to_string())?;
+    let dir = PathBuf::from(home).join("Downloads");
+    if dir.is_dir() {
+        Ok(dir)
+    } else {
+        Err("下载目录不存在".to_string())
+    }
+}
+
+/// Save a binary response body to a location the user picks.
+///
+/// The body arrives as base64 because that's how `execute` hands binary
+/// payloads to the front-end (see the `looks_binary` branch there). We decode
+/// straight to bytes and write those — the data never passes through a UTF-8
+/// conversion, which is what used to turn downloads into corrupted files.
+///
+/// `rfd` is used rather than a dialog plugin because it's already a direct
+/// dependency (see `select_folder` in lib.rs) and this feature must not add one.
+/// The dialog handles the overwrite confirmation for us, so there's no
+/// de-duplicating of names here.
+///
+/// Returns the full path written, or `Ok(None)` when the user cancels —
+/// cancelling is a normal outcome, not an error the UI should shout about.
+#[tauri::command]
+pub fn api_save_binary_body(
+    body_base64: String,
+    url: String,
+    headers: Vec<(String, String)>,
+) -> Result<Option<String>, String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(body_base64.as_bytes())
+        .map_err(|e| format!("响应体解码失败：{e}"))?;
+
+    if bytes.is_empty() {
+        return Err("响应体为空，无内容可保存。".to_string());
+    }
+
+    let content_type = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("");
+
+    let name = suggest_download_name(&headers, &url, content_type);
+
+    let mut dialog = rfd::FileDialog::new()
+        .set_title("保存响应体")
+        .set_file_name(&name);
+    // Only steer the dialog's starting folder if we can actually resolve one;
+    // a missing profile dir shouldn't block the save outright.
+    if let Ok(dir) = downloads_dir() {
+        dialog = dialog.set_directory(dir);
+    }
+
+    let target = match dialog.save_file() {
+        Some(path) => path,
+        None => return Ok(None),
+    };
+
+    fs::write(&target, &bytes).map_err(|e| format!("写入文件失败：{e}"))?;
+
+    Ok(Some(target.to_string_lossy().into_owned()))
+}
+
+/// Reveal a previously saved file using the opener plugin already in the tree.
+#[tauri::command]
+pub fn api_reveal_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let p = std::path::Path::new(&path);
+    // Open the containing folder rather than the file itself: launching an
+    // arbitrary downloaded document is a bigger action than the user asked for.
+    let target = p.parent().unwrap_or(p);
+    app.opener()
+        .open_path(target.to_string_lossy().to_string(), None::<&str>)
+        .map_err(|e| format!("打开文件夹失败：{e}"))
+}
+
 // ============================================================
 // Unit tests for file-private helpers in api.rs.
 //
@@ -937,8 +1391,350 @@ mod tests {
     use crate::models::ApiNodeType;
     use std::collections::HashMap;
 
+    /// `build()` exposes only explicitly-set headers.
+    ///
+    /// Verified by experiment: host / accept / user-agent / accept-encoding
+    /// are added by hyper while writing to the socket, so they are absent
+    /// here. This is why `execute` reconstructs them via
+    /// `add_implicit_header` — without that, a request carrying no custom
+    /// headers renders an empty "请求头" tab.
+    #[test]
+    fn build_exposes_only_explicit_headers() {
+        let client = reqwest::Client::new();
+        let built = client
+            .get("http://example.com/x")
+            .header("x-mine", "1")
+            .build()
+            .expect("build");
+        let names: Vec<String> = built
+            .headers()
+            .iter()
+            .map(|(k, _)| k.as_str().to_string())
+            .collect();
+        assert_eq!(names, vec!["x-mine".to_string()]);
+    }
+
+    #[test]
+    fn implicit_headers_do_not_override_explicit_ones() {
+        let mut h = hs(&[("Host", "custom.example")]);
+        add_implicit_header(&mut h, "host", "real.example");
+        add_implicit_header(&mut h, "accept", "*/*");
+        // The user's Host survives, case-insensitively matched.
+        assert_eq!(h[0], ("Host".to_string(), "custom.example".to_string()));
+        // A header nobody set is appended.
+        assert_eq!(h[1], ("accept".to_string(), "*/*".to_string()));
+        assert_eq!(h.len(), 2);
+    }
+
     fn vars(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    // ── env shared headers ─────────────────────────────────────
+
+    fn hs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn merge_env_headers_inherits_when_request_is_silent() {
+        let out = merge_env_headers(
+            &hs(&[("Authorization", "Bearer t"), ("X-Tenant", "acme")]),
+            &hs(&[("Accept", "application/json")]),
+        );
+        assert_eq!(
+            out,
+            hs(&[
+                ("Authorization", "Bearer t"),
+                ("X-Tenant", "acme"),
+                ("Accept", "application/json"),
+            ])
+        );
+    }
+
+    #[test]
+    fn merge_env_headers_request_wins_case_insensitively() {
+        // The request's spelling and value survive; the env entry vanishes
+        // rather than being sent twice.
+        let out = merge_env_headers(
+            &hs(&[("Authorization", "Bearer env")]),
+            &hs(&[("authorization", "Bearer own")]),
+        );
+        assert_eq!(out, hs(&[("authorization", "Bearer own")]));
+    }
+
+    #[test]
+    fn merge_env_headers_blank_value_opts_out() {
+        // The escape hatch: one request needs to be anonymous.
+        let out = merge_env_headers(
+            &hs(&[("Authorization", "Bearer env"), ("X-Tenant", "acme")]),
+            &hs(&[("Authorization", "  ")]),
+        );
+        assert_eq!(out, hs(&[("X-Tenant", "acme")]));
+    }
+
+    #[test]
+    fn merge_env_headers_blank_value_shadowing_nothing_is_kept() {
+        // Regression guard: opting out must not change how a plain empty
+        // header behaved before environments could carry headers at all.
+        let out = merge_env_headers(&[], &hs(&[("X-Debug", "")]));
+        assert_eq!(out, hs(&[("X-Debug", "")]));
+    }
+
+    #[test]
+    fn merge_env_headers_skips_blank_names() {
+        let out = merge_env_headers(&hs(&[("", "ignored")]), &hs(&[("  ", "also")]));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn merge_env_headers_without_env_is_identity() {
+        let own = hs(&[("Accept", "*/*"), ("X-A", "1")]);
+        assert_eq!(merge_env_headers(&[], &own), own);
+    }
+
+    // ── per-request env binding ────────────────────────────────
+    // Envs bind per request via `ApiRequest::env_id`; there is no global
+    // "active env". These pin the three resolution outcomes.
+
+    fn store_with_env() -> ApiStore {
+        let store = ApiStore::new(None);
+        store.upsert_env(ApiEnvironment {
+            id: "dev".to_string(),
+            name: "Dev".to_string(),
+            base_url: "http://dev.test".to_string(),
+            headers: vec![("X-Env".to_string(), "dev".to_string())],
+            vars: vec![("token".to_string(), "abc".to_string())],
+        });
+        store
+    }
+
+    #[test]
+    fn env_snapshot_resolves_the_requests_own_env() {
+        let store = store_with_env();
+        let snap = store.env_snapshot(Some("dev"));
+        assert_eq!(snap.base_url, "http://dev.test");
+        assert_eq!(snap.headers, hs(&[("X-Env", "dev")]));
+        assert_eq!(snap.vars.get("token").map(String::as_str), Some("abc"));
+    }
+
+    #[test]
+    fn env_snapshot_without_binding_is_empty() {
+        // "No env bound" means send exactly what the user typed: no base
+        // prepended, no shared headers, placeholders left literal.
+        let store = store_with_env();
+        let snap = store.env_snapshot(None);
+        assert!(snap.base_url.is_empty());
+        assert!(snap.headers.is_empty());
+        assert!(snap.vars.is_empty());
+        assert_eq!(join_base_url(&snap.base_url, "/api/x"), "/api/x");
+        assert_eq!(merge_env_headers(&snap.headers, &hs(&[("A", "1")])), hs(&[("A", "1")]));
+    }
+
+    #[test]
+    fn env_snapshot_with_dangling_id_degrades_to_no_env() {
+        // Deleting an env leaves referencing requests with a stale id. That
+        // must behave as "unbound", not panic or resurrect anything.
+        let store = store_with_env();
+        store.delete_env("dev");
+        let snap = store.env_snapshot(Some("dev"));
+        assert!(snap.base_url.is_empty());
+        assert!(snap.headers.is_empty());
+        assert!(snap.vars.is_empty());
+    }
+
+    #[test]
+    fn env_snapshot_keeps_sibling_envs_apart() {
+        // Two requests sent back to back may resolve different envs; one
+        // must never pick up the other's base or headers.
+        let store = store_with_env();
+        store.upsert_env(ApiEnvironment {
+            id: "prod".to_string(),
+            name: "Prod".to_string(),
+            base_url: "https://prod.test".to_string(),
+            headers: vec![("X-Env".to_string(), "prod".to_string())],
+            vars: vec![("token".to_string(), "zzz".to_string())],
+        });
+        let dev = store.env_snapshot(Some("dev"));
+        let prod = store.env_snapshot(Some("prod"));
+        assert_eq!(dev.base_url, "http://dev.test");
+        assert_eq!(prod.base_url, "https://prod.test");
+        assert_eq!(prod.headers, hs(&[("X-Env", "prod")]));
+        assert_eq!(prod.vars.get("token").map(String::as_str), Some("zzz"));
+    }
+
+    // ── env base URL joining ───────────────────────────────────
+
+    #[test]
+    fn join_base_url_leaves_absolute_urls_alone() {
+        // An explicit address must never be rewritten by the active env,
+        // whatever the base says — this is the safety property of the feature.
+        let base = "http://10.61.107.5:2001";
+        assert_eq!(join_base_url(base, "https://example.com/x"), "https://example.com/x");
+        assert_eq!(join_base_url(base, "http://other:8080/y"), "http://other:8080/y");
+        // Scheme detection is case-insensitive.
+        assert_eq!(join_base_url(base, "HTTPS://example.com/z"), "HTTPS://example.com/z");
+    }
+
+    #[test]
+    fn join_base_url_prepends_relative_paths() {
+        let base = "http://10.61.107.5:2001";
+        assert_eq!(
+            join_base_url(base, "/front-api/orders"),
+            "http://10.61.107.5:2001/front-api/orders"
+        );
+        // Missing leading slash is just as common as having one.
+        assert_eq!(
+            join_base_url(base, "front-api/orders"),
+            "http://10.61.107.5:2001/front-api/orders"
+        );
+    }
+
+    #[test]
+    fn join_base_url_collapses_the_seam() {
+        // Trailing slash on the base plus leading slash on the path is the
+        // exact combination that used to produce `host//path`.
+        assert_eq!(
+            join_base_url("http://h:1/", "/api/x"),
+            "http://h:1/api/x"
+        );
+        assert_eq!(join_base_url("http://h:1///", "///api/x"), "http://h:1/api/x");
+    }
+
+    #[test]
+    fn join_base_url_without_base_is_identity() {
+        // No env active, or env with an empty base: behave exactly as before.
+        assert_eq!(join_base_url("", "/api/x"), "/api/x");
+        assert_eq!(join_base_url("   ", "/api/x"), "/api/x");
+        assert_eq!(join_base_url("", "http://a/b"), "http://a/b");
+    }
+
+    #[test]
+    fn join_base_url_with_empty_url_yields_base() {
+        assert_eq!(join_base_url("http://h:1", ""), "http://h:1");
+        assert_eq!(join_base_url("http://h:1/", "  "), "http://h:1/");
+    }
+
+    // ── binary download naming ─────────────────────────────────
+    // A malicious or careless server controls Content-Disposition, so these
+    // guard the path-traversal filter as much as the happy path.
+
+    #[test]
+    fn sanitize_filename_strips_directory_traversal() {
+        assert_eq!(
+            sanitize_filename("../../autorun.inf").as_deref(),
+            Some("autorun.inf")
+        );
+        assert_eq!(
+            sanitize_filename(r"..\..\windows\system32\evil.dll").as_deref(),
+            Some("evil.dll")
+        );
+        assert_eq!(sanitize_filename("C:/Windows/hosts").as_deref(), Some("hosts"));
+        // Pure traversal segments carry no name at all.
+        assert_eq!(sanitize_filename(".."), None);
+        assert_eq!(sanitize_filename("../"), None);
+        assert_eq!(sanitize_filename("   "), None);
+    }
+
+    #[test]
+    fn sanitize_filename_drops_characters_windows_rejects() {
+        assert_eq!(
+            sanitize_filename("re<po>rt|1?.xlsx").as_deref(),
+            Some("report1.xlsx")
+        );
+        // Control characters (including the NUL truncation trick) are removed.
+        assert_eq!(sanitize_filename("a\u{0}b.bin").as_deref(), Some("ab.bin"));
+    }
+
+    #[test]
+    fn filename_from_disposition_reads_quoted_and_bare_forms() {
+        assert_eq!(
+            filename_from_disposition("attachment; filename=\"report.xlsx\"").as_deref(),
+            Some("report.xlsx")
+        );
+        assert_eq!(
+            filename_from_disposition("attachment; filename=report.xlsx").as_deref(),
+            Some("report.xlsx")
+        );
+        assert_eq!(filename_from_disposition("inline").as_deref(), None);
+    }
+
+    #[test]
+    fn filename_from_disposition_prefers_rfc5987_starred_form() {
+        // The starred parameter is the one that can carry non-ASCII, so it wins
+        // even when it appears after the plain fallback.
+        let v = "attachment; filename=\"fallback.bin\"; filename*=UTF-8''%E6%8A%A5%E8%A1%A8.xlsx";
+        assert_eq!(filename_from_disposition(v).as_deref(), Some("报表.xlsx"));
+    }
+
+    #[test]
+    fn filename_from_disposition_percent_decodes_spaces() {
+        let v = "attachment; filename*=UTF-8''report%20final.xlsx";
+        assert_eq!(filename_from_disposition(v).as_deref(), Some("report final.xlsx"));
+    }
+
+    #[test]
+    fn percent_decode_leaves_malformed_escapes_alone() {
+        // A trailing '%' or non-hex digits must not panic or eat characters.
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("a%zz"), "a%zz");
+    }
+
+    #[test]
+    fn suggest_download_name_falls_back_to_url_then_mime() {
+        // No Content-Disposition: use the URL's last segment.
+        let name = suggest_download_name(&[], "https://x.test/api/export.xlsx?t=1", "");
+        assert_eq!(name, "export.xlsx");
+
+        // URL has no usable extension: append one derived from the MIME type.
+        let name = suggest_download_name(
+            &[],
+            "https://x.test/api/export",
+            "application/pdf; charset=binary",
+        );
+        assert_eq!(name, "export.pdf");
+
+        // Unknown MIME and no extension: leave the stem bare rather than
+        // guessing wrong and making Windows open the wrong program.
+        let name = suggest_download_name(&[], "https://x.test/api/blob", "application/x-weird");
+        assert_eq!(name, "blob");
+    }
+
+    #[test]
+    fn suggest_download_name_does_not_double_up_extensions() {
+        let headers = vec![(
+            "Content-Disposition".to_string(),
+            "attachment; filename=\"data.xlsx\"".to_string(),
+        )];
+        let name = suggest_download_name(
+            &headers,
+            "https://x.test/whatever",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        );
+        assert_eq!(name, "data.xlsx");
+    }
+
+    #[test]
+    fn suggest_download_name_matches_header_case_insensitively() {
+        // reqwest lowercases header names; other sources may not.
+        let headers = vec![(
+            "content-disposition".to_string(),
+            "attachment; filename=\"a.zip\"".to_string(),
+        )];
+        assert_eq!(
+            suggest_download_name(&headers, "https://x.test/b", ""),
+            "a.zip"
+        );
+    }
+
+    #[test]
+    fn suggest_download_name_survives_a_url_with_no_path() {
+        let name = suggest_download_name(&[], "https://x.test", "image/png");
+        // "x.test" already looks extensioned, so no MIME suffix is appended.
+        assert_eq!(name, "x.test");
+
+        let name = suggest_download_name(&[], "", "image/png");
+        assert_eq!(name, "download.png");
     }
 
     // ── expand_placeholders ────────────────────────────────────

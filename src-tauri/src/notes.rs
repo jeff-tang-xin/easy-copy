@@ -39,8 +39,13 @@ impl NoteManager {
             .map(|d| d.join("notes.json"))
     }
 
-    /// Load notes from `notes.json`. Silently starts empty on any error
-    /// (missing file, corrupt JSON, permission issue).
+    /// Load notes from `notes.json`.
+    ///
+    /// A missing file is normal (first run) and starts empty. Corrupt JSON is
+    /// *not* normal: silently starting empty there would show the user "no
+    /// notes", and the next save would overwrite the damaged-but-possibly-
+    /// recoverable file with `[]`. So a corrupt file is renamed aside to
+    /// `notes.corrupt-<ts>.json` before we continue with an empty list.
     pub fn load(&self) {
         let path = match self.notes_file() {
             Some(p) => p,
@@ -50,24 +55,60 @@ impl NoteManager {
             Ok(j) => j,
             Err(_) => return,
         };
-        if let Ok(loaded) = serde_json::from_str::<Vec<Note>>(&json) {
-            *self.notes.lock().unwrap_or_else(|e| e.into_inner()) = loaded;
+        match serde_json::from_str::<Vec<Note>>(&json) {
+            Ok(loaded) => {
+                *self.notes.lock().unwrap_or_else(|e| e.into_inner()) = loaded;
+            }
+            Err(e) => {
+                let backup = path.with_file_name(format!(
+                    "notes.corrupt-{}.json",
+                    chrono::Utc::now().timestamp_millis()
+                ));
+                let _ = fs::rename(&path, &backup);
+                eprintln!(
+                    "[notes] notes.json is corrupt ({e}); moved to {} and starting empty",
+                    backup.display()
+                );
+            }
         }
     }
 
-    /// Write notes to `notes.json`. Best-effort, errors ignored.
-    fn save(&self) {
+    /// Persist notes to `notes.json` atomically.
+    ///
+    /// Two deliberate departures from the previous best-effort version:
+    ///
+    /// 1. **Returns `Result`.** The old signature was `()` with `let _ =
+    ///    fs::write(..)`, so a full disk or a locked file was swallowed whole
+    ///    and the UI still rendered "✓ saved". Reporting a write failure as
+    ///    success is worse than crashing — the user closes the app trusting
+    ///    data is on disk that never got there.
+    /// 2. **Temp file + rename.** A plain `fs::write` truncates in place, so a
+    ///    crash mid-write leaves truncated JSON. `rename` over an existing file
+    ///    is atomic on NTFS and POSIX alike, so readers see either the old file
+    ///    or the new one, never a partial one. Mirrors `api.rs::save`.
+    fn save(&self) -> Result<(), String> {
         let path = match self.notes_file() {
+            // No data dir configured yet: nothing to persist to. Not an error.
+            None => return Ok(()),
             Some(p) => p,
-            None => return,
         };
         if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("无法创建便签目录 {}：{e}", parent.display()))?;
         }
-        let notes = self.notes.lock().unwrap_or_else(|e| e.into_inner());
-        if let Ok(json) = serde_json::to_string_pretty(&*notes) {
-            let _ = fs::write(path, json);
-        }
+        let json = {
+            let notes = self.notes.lock().unwrap_or_else(|e| e.into_inner());
+            serde_json::to_string_pretty(&*notes)
+                .map_err(|e| format!("便签序列化失败：{e}"))?
+        };
+        let tmp = path.with_extension("json.tmp");
+        fs::write(&tmp, &json)
+            .map_err(|e| format!("无法写入便签临时文件 {}：{e}", tmp.display()))?;
+        fs::rename(&tmp, &path).map_err(|e| {
+            let _ = fs::remove_file(&tmp);
+            format!("无法保存便签到 {}：{e}", path.display())
+        })?;
+        Ok(())
     }
 
     /// Return notes sorted by (pinned desc, updated_at desc).
@@ -81,14 +122,24 @@ impl NoteManager {
         items
     }
 
-    pub fn create(&self, input: NoteInput, source_clip_id: Option<String>) -> Note {
+    /// Create a note and persist.
+    ///
+    /// Note the ordering: the in-memory list is updated first, then flushed. If
+    /// the flush fails the note still exists in memory (so the user's work is
+    /// not thrown away mid-session) but the error propagates so the UI can say
+    /// "not saved to disk" instead of a false success.
+    pub fn create(
+        &self,
+        input: NoteInput,
+        source_clip_id: Option<String>,
+    ) -> Result<Note, String> {
         let note = Note::new(input, source_clip_id);
         self.notes.lock().unwrap_or_else(|e| e.into_inner()).push(note.clone());
-        self.save();
-        note
+        self.save()?;
+        Ok(note)
     }
 
-    pub fn update(&self, id: &str, input: NoteInput) -> Option<Note> {
+    pub fn update(&self, id: &str, input: NoteInput) -> Result<Option<Note>, String> {
         let mut notes = self.notes.lock().unwrap_or_else(|e| e.into_inner());
         let found = notes.iter_mut().find(|n| n.id == id).map(|n| {
             n.apply_update(input);
@@ -96,23 +147,24 @@ impl NoteManager {
         });
         drop(notes);
         if found.is_some() {
-            self.save();
+            self.save()?;
         }
-        found
+        Ok(found)
     }
 
-    pub fn delete(&self, id: &str) {
+    pub fn delete(&self, id: &str) -> Result<(), String> {
         let mut notes = self.notes.lock().unwrap_or_else(|e| e.into_inner());
         let before = notes.len();
         notes.retain(|n| n.id != id);
         let changed = notes.len() != before;
         drop(notes);
         if changed {
-            self.save();
+            self.save()?;
         }
+        Ok(())
     }
 
-    pub fn toggle_pin(&self, id: &str) {
+    pub fn toggle_pin(&self, id: &str) -> Result<(), String> {
         let mut notes = self.notes.lock().unwrap_or_else(|e| e.into_inner());
         let mut changed = false;
         if let Some(n) = notes.iter_mut().find(|n| n.id == id) {
@@ -122,8 +174,9 @@ impl NoteManager {
         }
         drop(notes);
         if changed {
-            self.save();
+            self.save()?;
         }
+        Ok(())
     }
 
     /// Convenience: get a single note by id.
@@ -149,7 +202,7 @@ impl NoteManager {
     /// Rename a category across all notes. Empty `from` targets uncategorized notes;
     /// empty `to` clears the category (moves them to uncategorized).
     /// Returns the number of notes affected.
-    pub fn rename_category(&self, from: &str, to: &str) -> usize {
+    pub fn rename_category(&self, from: &str, to: &str) -> Result<usize, String> {
         let from = from.trim().to_string();
         let to_trim = to.trim().to_string();
         let new_val = if to_trim.is_empty() { None } else { Some(to_trim) };
@@ -169,17 +222,17 @@ impl NoteManager {
         }
         drop(notes);
         if count > 0 {
-            self.save();
+            self.save()?;
         }
-        count
+        Ok(count)
     }
 
     /// Delete a category: clears `category` on all matching notes (notes themselves are kept).
     /// Returns number of notes affected.
-    pub fn delete_category(&self, name: &str) -> usize {
+    pub fn delete_category(&self, name: &str) -> Result<usize, String> {
         let name = name.trim().to_string();
         if name.is_empty() {
-            return 0;
+            return Ok(0);
         }
         let mut notes = self.notes.lock().unwrap_or_else(|e| e.into_inner());
         let mut count = 0usize;
@@ -193,9 +246,9 @@ impl NoteManager {
         }
         drop(notes);
         if count > 0 {
-            self.save();
+            self.save()?;
         }
-        count
+        Ok(count)
     }
 }
 
@@ -228,6 +281,15 @@ mod tests {
         NoteManager::new(Some(dir))
     }
 
+    /// `create` now returns `Result` so callers can surface disk failures.
+    /// Tests using a fresh temp dir never legitimately fail to save, so they
+    /// unwrap through this helper rather than sprinkling `.unwrap()` at every
+    /// call site — a save failure here means the test setup is broken, and the
+    /// panic message says exactly that.
+    fn mk(m: &NoteManager, input: NoteInput) -> Note {
+        m.create(input, None).expect("save to temp dir should succeed")
+    }
+
     fn input(title: &str, content: &str) -> NoteInput {
         NoteInput {
             title: title.to_string(),
@@ -249,7 +311,7 @@ mod tests {
     #[test]
     fn create_then_list_returns_the_note() {
         let m = fresh_manager();
-        let n = m.create(input("hello", "world"), None);
+        let n = mk(&m, input("hello", "world"));
         assert_eq!(n.title, "hello");
         assert_eq!(n.content, "world");
         assert!(!n.pinned);
@@ -261,7 +323,7 @@ mod tests {
     #[test]
     fn update_replaces_title_content_tags_and_bumps_updated_at() {
         let m = fresh_manager();
-        let n = m.create(input("a", "old"), None);
+        let n = mk(&m, input("a", "old"));
         // Force a measurable timestamp gap. `chrono::Utc::now().timestamp_millis()`
         // has ms resolution, so a 5ms sleep is enough to guarantee a strictly
         // larger `updated_at` without making the test slow.
@@ -276,6 +338,7 @@ mod tests {
                     category: None,
                 },
             )
+            .expect("save should succeed")
             .expect("note should exist");
         assert_eq!(updated.title, "b");
         assert_eq!(updated.content, "new");
@@ -286,15 +349,15 @@ mod tests {
     #[test]
     fn update_on_missing_id_returns_none() {
         let m = fresh_manager();
-        let result = m.update("does-not-exist", input("x", "y"));
+        let result = m.update("does-not-exist", input("x", "y")).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn delete_removes_the_note() {
         let m = fresh_manager();
-        let n = m.create(input("a", "b"), None);
-        m.delete(&n.id);
+        let n = mk(&m, input("a", "b"));
+        m.delete(&n.id).unwrap();
         assert!(m.list().is_empty());
     }
 
@@ -305,12 +368,12 @@ mod tests {
         // `changed` so the save() call is skipped — this test pins
         // that contract.
         let m = fresh_manager();
-        let n = m.create(input("a", "b"), None);
-        m.delete("nonexistent");
+        let n = mk(&m, input("a", "b"));
+        m.delete("nonexistent").unwrap();
         assert_eq!(m.list().len(), 1);
-        m.delete(&n.id);
+        m.delete(&n.id).unwrap();
         assert!(m.list().is_empty());
-        m.delete(&n.id); // second delete on same id
+        m.delete(&n.id).unwrap(); // second delete on same id
         assert!(m.list().is_empty());
     }
 
@@ -319,14 +382,14 @@ mod tests {
         let m = fresh_manager();
         // Insert oldest, middle, newest (by creation order, since
         // `Note::new` sets `updated_at = now`).
-        let old = m.create(input("old", ""), None);
+        let old = mk(&m, input("old", ""));
         std::thread::sleep(std::time::Duration::from_millis(5));
-        let mid = m.create(input("mid", ""), None);
+        let mid = mk(&m, input("mid", ""));
         std::thread::sleep(std::time::Duration::from_millis(5));
-        let new = m.create(input("new", ""), None);
+        let new = mk(&m, input("new", ""));
 
         // Pin the oldest one — it should jump to position 0.
-        m.toggle_pin(&old.id);
+        m.toggle_pin(&old.id).unwrap();
         let listed = m.list();
         assert_eq!(listed[0].id, old.id);
         assert!(listed[0].pinned);
@@ -338,11 +401,11 @@ mod tests {
     #[test]
     fn toggle_pin_flips_state() {
         let m = fresh_manager();
-        let n = m.create(input("a", "b"), None);
+        let n = mk(&m, input("a", "b"));
         assert!(!m.list()[0].pinned);
-        m.toggle_pin(&n.id);
+        m.toggle_pin(&n.id).unwrap();
         assert!(m.list()[0].pinned);
-        m.toggle_pin(&n.id);
+        m.toggle_pin(&n.id).unwrap();
         assert!(!m.list()[0].pinned);
     }
 
@@ -350,18 +413,18 @@ mod tests {
     fn toggle_pin_on_missing_id_is_a_noop() {
         // No panic, no extra notes, nothing changes.
         let m = fresh_manager();
-        m.toggle_pin("missing");
+        m.toggle_pin("missing").unwrap();
         assert!(m.list().is_empty());
     }
 
     #[test]
     fn list_categories_returns_sorted_distinct_non_empty() {
         let m = fresh_manager();
-        m.create(input_with_category("a", "", Some("work")), None);
-        m.create(input_with_category("b", "", Some("personal")), None);
-        m.create(input_with_category("c", "", Some("work")), None); // duplicate
-        m.create(input_with_category("d", "", Some("")), None);      // empty → excluded
-        m.create(input_with_category("e", "", None), None);          // None → excluded
+        mk(&m, input_with_category("a", "", Some("work")));
+        mk(&m, input_with_category("b", "", Some("personal")));
+        mk(&m, input_with_category("c", "", Some("work"))); // duplicate
+        mk(&m, input_with_category("d", "", Some("")));      // empty → excluded
+        mk(&m, input_with_category("e", "", None));          // None → excluded
         let cats = m.list_categories();
         assert_eq!(cats, vec!["personal".to_string(), "work".to_string()]);
     }
@@ -369,10 +432,10 @@ mod tests {
     #[test]
     fn rename_category_updates_all_matching_notes() {
         let m = fresh_manager();
-        let a = m.create(input_with_category("a", "", Some("old")), None);
-        let b = m.create(input_with_category("b", "", Some("old")), None);
-        let c = m.create(input_with_category("c", "", Some("other")), None);
-        let updated = m.rename_category("old", "new");
+        let a = mk(&m, input_with_category("a", "", Some("old")));
+        let b = mk(&m, input_with_category("b", "", Some("old")));
+        let c = mk(&m, input_with_category("c", "", Some("other")));
+        let updated = m.rename_category("old", "new").unwrap();
         assert_eq!(updated, 2);
         // Reload from disk to prove the rename persisted, not just
         // sat in memory until the manager was dropped.
@@ -394,8 +457,8 @@ mod tests {
     #[test]
     fn rename_category_to_empty_clears_it() {
         let m = fresh_manager();
-        let a = m.create(input_with_category("a", "", Some("old")), None);
-        let updated = m.rename_category("old", "");
+        let a = mk(&m, input_with_category("a", "", Some("old")));
+        let updated = m.rename_category("old", "").unwrap();
         assert_eq!(updated, 1);
         let listed = m.list();
         assert!(listed.iter().find(|n| n.id == a.id).unwrap().category.is_none());
@@ -404,8 +467,8 @@ mod tests {
     #[test]
     fn delete_category_only_clears_category_not_the_note() {
         let m = fresh_manager();
-        let a = m.create(input_with_category("a", "keep me", Some("old")), None);
-        let updated = m.delete_category("old");
+        let a = mk(&m, input_with_category("a", "keep me", Some("old")));
+        let updated = m.delete_category("old").unwrap();
         assert_eq!(updated, 1);
         // Note itself is still there, just uncategorized.
         let listed = m.list();
@@ -437,8 +500,8 @@ mod tests {
                 category: Some("cat".into()),
             },
             None,
-        );
-        m1.toggle_pin(&n.id);
+        ).expect("save should succeed");
+        m1.toggle_pin(&n.id).unwrap();
 
         let m2 = NoteManager::new(Some(dir.clone()));
         m2.load();
@@ -463,10 +526,11 @@ mod tests {
     }
 
     #[test]
-    fn load_silently_ignores_corrupt_json() {
-        // If notes.json is unparseable, `load` should not crash and
-        // should leave the manager empty. Verified by writing garbage
-        // and reloading.
+    fn load_moves_corrupt_json_aside_instead_of_discarding_it() {
+        // Unparseable notes.json must not crash, and must not be left in
+        // place: the next save would overwrite it with `[]`, destroying data
+        // the user might still recover by hand. `load` renames it to
+        // notes.corrupt-<ts>.json and continues empty.
         let dir = std::env::temp_dir().join(format!(
             "easy-copy-notes-test-corrupt-{}-{}",
             std::process::id(),
@@ -474,8 +538,39 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("notes.json"), "{ not valid json").unwrap();
-        let m = NoteManager::new(Some(dir));
+        let m = NoteManager::new(Some(dir.clone()));
         m.load();
         assert!(m.list().is_empty());
+
+        // Original path is gone...
+        assert!(!dir.join("notes.json").exists());
+        // ...and its bytes survive under a corrupt-* sibling.
+        let salvaged: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("notes.corrupt-"))
+            .collect();
+        assert_eq!(salvaged.len(), 1, "expected exactly one salvaged file, got {salvaged:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join(&salvaged[0])).unwrap(),
+            "{ not valid json"
+        );
+    }
+
+    #[test]
+    fn save_leaves_no_tmp_file_behind() {
+        // save() writes notes.json.tmp then renames. If the rename path ever
+        // regressed to a copy, or an early return skipped cleanup, the temp
+        // file would accumulate next to the real one. Pin that it doesn't.
+        let m = fresh_manager();
+        mk(&m, input("a", "b"));
+        let path = m.notes_file().unwrap();
+        let dir = path.parent().unwrap();
+        assert!(path.exists(), "notes.json should exist after save");
+        assert!(
+            !dir.join("notes.json.tmp").exists(),
+            "temp file must be renamed away, not left behind"
+        );
     }
 }

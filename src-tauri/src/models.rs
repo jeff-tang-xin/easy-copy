@@ -182,6 +182,44 @@ fn default_true() -> bool { true }
 fn default_max_items() -> usize { 500 }
 fn default_poll_interval() -> u64 { 500 }
 
+/// Lower/upper bound for `AppConfig::max_items`.
+///
+/// Why clamp at all: the value comes straight from a user-editable number
+/// input, so `0` (history silently discards everything) and absurdly large
+/// values (unbounded memory + a multi-MB `history.json` rewritten on every
+/// copy) are both reachable by typing. 50 keeps the list useful, 2000 keeps
+/// the save cost bounded.
+pub const MIN_MAX_ITEMS: usize = 50;
+pub const MAX_MAX_ITEMS: usize = 2000;
+
+/// Clamp a user-supplied history cap into `MIN_MAX_ITEMS..=MAX_MAX_ITEMS`.
+///
+/// NB: this is deliberately applied only on the *config* paths (`set_config`
+/// / `load_config`), not inside `ClipboardManager::new`, because the manager
+/// constructor is also used with small caps (e.g. 3) for internal/eviction
+/// purposes and must honour exactly what it is given.
+pub fn clamp_max_items(n: usize) -> usize {
+    n.clamp(MIN_MAX_ITEMS, MAX_MAX_ITEMS)
+}
+
+/// Lower/upper bound for `AppConfig::poll_interval_ms`.
+///
+/// Why clamp at all: this value is fed straight to `thread::sleep` in the
+/// clipboard polling loop. A `0` turns that loop into a busy-wait that pins a
+/// core for the lifetime of the app, and the front-end input was the only thing
+/// preventing it — a hand-edited `config.json` or a future caller would sail
+/// right past. 200ms keeps polling responsive without spinning; 60s is a
+/// generous ceiling that still lets the loop notice a config change.
+pub const MIN_POLL_INTERVAL_MS: u64 = 200;
+pub const MAX_POLL_INTERVAL_MS: u64 = 60_000;
+
+/// Clamp a user-supplied poll interval into `MIN..=MAX`.
+///
+/// Applied on the same config paths as `clamp_max_items`.
+pub fn clamp_poll_interval(ms: u64) -> u64 {
+    ms.clamp(MIN_POLL_INTERVAL_MS, MAX_POLL_INTERVAL_MS)
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -232,6 +270,14 @@ pub struct ProxyConfig {
     pub port: u16,
     pub running: bool,
     pub routes: Vec<ProxyRoute>,
+    /// Bind to `0.0.0.0` instead of `127.0.0.1` when true.
+    ///
+    /// Security-sensitive: exposing the proxy on the LAN turns it into an open
+    /// relay for anyone on the same network, so it must stay opt-in. `default`
+    /// (false) also keeps config files written before this field existed
+    /// loadable — serde fills in the safe value rather than failing the parse.
+    #[serde(default)]
+    pub allow_lan: bool,
 }
 
 /// A single proxy request log entry.
@@ -326,7 +372,12 @@ pub struct ApiRequest {
     /// File path for msgpack body (used when body_type == "msgpack").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub msgpack_file: Option<String>,
-    /// Optional environment id used to expand `{{var}}` placeholders.
+    /// The environment this request is bound to.
+    ///
+    /// Binding is **per request**: this id alone decides which env supplies
+    /// `{{var}}` values, the base URL and the shared headers. `None` — or an
+    /// id whose env has since been deleted — means no env at all: the URL is
+    /// sent as written and placeholders stay literal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_id: Option<String>,
     /// Most recent N (50) responses — newest first, capped via `history_limit`.
@@ -461,6 +512,25 @@ pub struct ApiResponse {
 pub struct ApiEnvironment {
     pub id: String,
     pub name: String,
+    /// Origin prepended to relative request URLs, e.g. `http://10.61.107.5:2001`.
+    ///
+    /// A first-class field rather than a magically-named entry in `vars`: the
+    /// var list is an undifferentiated bag of key/value pairs, so nothing there
+    /// can tell "the server address" apart from a token or a user id. Users
+    /// reasonably expect picking an environment to *point the request at a
+    /// machine*, and that only works if the machine has a dedicated slot.
+    /// Empty means "no base" — relative URLs then fail as they always did.
+    /// `serde(default)` keeps pre-existing collection files loadable.
+    #[serde(default)]
+    pub base_url: String,
+    /// Headers merged into every request sent while this env is active, e.g. a
+    /// shared `Authorization` or tenant id.
+    ///
+    /// Same rationale as `base_url`: without a dedicated slot the only way to
+    /// share a header across twenty requests is to type `{{token}}` into all
+    /// twenty of them. Merge rules live in `merge_env_headers`.
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
     #[serde(default)]
     pub vars: Vec<(String, String)>,
 }
@@ -473,7 +543,55 @@ pub struct ApiState {
     pub nodes: Vec<ApiNode>,
     #[serde(default)]
     pub envs: Vec<ApiEnvironment>,
-    /// Currently active environment id (`None` = no env expansion).
-    #[serde(default)]
-    pub active_env_id: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamp_max_items_raises_too_small_values() {
+        // 0 would make the history discard everything immediately.
+        assert_eq!(clamp_max_items(0), MIN_MAX_ITEMS);
+        assert_eq!(clamp_max_items(49), MIN_MAX_ITEMS);
+    }
+
+    #[test]
+    fn clamp_max_items_caps_too_large_values() {
+        assert_eq!(clamp_max_items(2001), MAX_MAX_ITEMS);
+        assert_eq!(clamp_max_items(usize::MAX), MAX_MAX_ITEMS);
+    }
+
+    #[test]
+    fn clamp_max_items_keeps_values_in_range() {
+        assert_eq!(clamp_max_items(MIN_MAX_ITEMS), MIN_MAX_ITEMS);
+        assert_eq!(clamp_max_items(500), 500);
+        assert_eq!(clamp_max_items(MAX_MAX_ITEMS), MAX_MAX_ITEMS);
+        // The serde default must itself be a valid (unclamped) value.
+        assert_eq!(clamp_max_items(default_max_items()), default_max_items());
+    }
+
+    #[test]
+    fn clamp_poll_interval_rejects_busy_wait_values() {
+        // 0 is the dangerous one: it turns the polling loop's `thread::sleep`
+        // into a spin that pins a core.
+        assert_eq!(clamp_poll_interval(0), MIN_POLL_INTERVAL_MS);
+        assert_eq!(clamp_poll_interval(1), MIN_POLL_INTERVAL_MS);
+        assert_eq!(clamp_poll_interval(199), MIN_POLL_INTERVAL_MS);
+    }
+
+    #[test]
+    fn clamp_poll_interval_caps_absurdly_long_waits() {
+        assert_eq!(clamp_poll_interval(60_001), MAX_POLL_INTERVAL_MS);
+        assert_eq!(clamp_poll_interval(u64::MAX), MAX_POLL_INTERVAL_MS);
+    }
+
+    #[test]
+    fn clamp_poll_interval_keeps_values_in_range() {
+        assert_eq!(clamp_poll_interval(MIN_POLL_INTERVAL_MS), MIN_POLL_INTERVAL_MS);
+        assert_eq!(clamp_poll_interval(500), 500);
+        assert_eq!(clamp_poll_interval(MAX_POLL_INTERVAL_MS), MAX_POLL_INTERVAL_MS);
+        // The serde default must itself survive clamping unchanged.
+        assert_eq!(clamp_poll_interval(default_poll_interval()), default_poll_interval());
+    }
 }

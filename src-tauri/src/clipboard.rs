@@ -11,7 +11,7 @@ use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
-use crate::models::{ClipboardItem, ItemType, AppConfig};
+use crate::models::{ClipboardItem, ItemType, AppConfig, clamp_max_items, clamp_poll_interval};
 
 /// Global clipboard access lock. Windows only allows one thread to hold the
 /// clipboard open at a time; the poll loop and any copy operation must not race
@@ -570,6 +570,15 @@ impl ClipboardManager {
 
     /// Update config (max_items, poll_interval) and persist.
     pub fn set_config(&self, config: AppConfig) {
+        // `config` arrives straight from the settings UI, so the history cap is
+        // clamped here (not in `new()`, which must honour the exact cap it is
+        // given). The clamped value is what we store *and* persist, otherwise
+        // the on-disk file would keep re-supplying the out-of-range number.
+        let mut config = config;
+        config.max_items = clamp_max_items(config.max_items);
+        // Same reasoning for the poll interval: 0 would busy-wait the polling
+        // thread. Clamped before it reaches the shared config the loop reads.
+        config.poll_interval_ms = clamp_poll_interval(config.poll_interval_ms);
         *self.max_items.lock().unwrap_or_else(|e| e.into_inner()) = config.max_items;
         *self.config.lock().unwrap_or_else(|e| e.into_inner()) = config.clone();
         // Save config to disk
@@ -587,6 +596,11 @@ impl ClipboardManager {
         if let Some(dir) = data_dir {
             if let Ok(json) = fs::read_to_string(dir.join("config.json")) {
                 if let Ok(config) = serde_json::from_str::<AppConfig>(&json) {
+                    // Guard against a hand-edited / legacy config.json carrying
+                    // an out-of-range cap or a busy-wait poll interval.
+                    let mut config = config;
+                    config.max_items = clamp_max_items(config.max_items);
+                    config.poll_interval_ms = clamp_poll_interval(config.poll_interval_ms);
                     *self.max_items.lock().unwrap_or_else(|e| e.into_inner()) = config.max_items;
                     *self.config.lock().unwrap_or_else(|e| e.into_inner()) = config;
                 }

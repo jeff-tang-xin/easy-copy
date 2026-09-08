@@ -12,11 +12,16 @@ mod process;
 mod screenshot;
 
 use crate::api::*;
-use crate::process::{list_processes, list_ports, kill_process};
+use crate::process::{
+    list_processes, list_ports, kill_process, kill_processes,
+    get_process_path, reveal_process_path,
+};
 use crate::proxy::{
     start_proxy, stop_proxy, get_proxy_logs, clear_proxy_logs,
     get_proxy_status, set_proxy_default_target, upsert_proxy_route,
     delete_proxy_route, toggle_proxy_route, urlencoding_min,
+    set_proxy_allow_lan, clear_proxy_routes, export_proxy_routes,
+    import_proxy_routes,
 };
 use crate::screenshot::{
     capture_screenshot, trigger_screenshot, save_screenshot,
@@ -419,7 +424,7 @@ fn list_notes(manager: tauri::State<'_, Arc<NoteManager>>) -> Vec<models::Note> 
 fn create_note(
     input: NoteInput,
     manager: tauri::State<'_, Arc<NoteManager>>,
-) -> models::Note {
+) -> Result<models::Note, String> {
     manager.create(input, None)
 }
 
@@ -428,7 +433,7 @@ fn update_note(
     id: String,
     input: NoteInput,
     manager: tauri::State<'_, Arc<NoteManager>>,
-) -> Option<models::Note> {
+) -> Result<Option<models::Note>, String> {
     manager.update(&id, input)
 }
 
@@ -437,18 +442,21 @@ fn delete_note(
     id: String,
     manager: tauri::State<'_, Arc<NoteManager>>,
     clip_manager: tauri::State<'_, Arc<ClipboardManager>>,
-) {
+) -> Result<(), String> {
     if let Some(note) = manager.get(&id) {
         if let Some(clip_id) = note.source_clip_id {
             clip_manager.set_saved_as_note(&clip_id, false);
         }
     }
-    manager.delete(&id);
+    manager.delete(&id)
 }
 
 #[tauri::command]
-fn toggle_note_pin(id: String, manager: tauri::State<'_, Arc<NoteManager>>) {
-    manager.toggle_pin(&id);
+fn toggle_note_pin(
+    id: String,
+    manager: tauri::State<'_, Arc<NoteManager>>,
+) -> Result<(), String> {
+    manager.toggle_pin(&id)
 }
 
 #[tauri::command]
@@ -461,7 +469,7 @@ fn rename_note_category(
     from: String,
     to: String,
     manager: tauri::State<'_, Arc<NoteManager>>,
-) -> usize {
+) -> Result<usize, String> {
     manager.rename_category(&from, &to)
 }
 
@@ -469,7 +477,7 @@ fn rename_note_category(
 fn delete_note_category(
     name: String,
     manager: tauri::State<'_, Arc<NoteManager>>,
-) -> usize {
+) -> Result<usize, String> {
     manager.delete_category(&name)
 }
 
@@ -536,7 +544,10 @@ fn create_note_from_clip(
         tags: vec!["clipboard".to_string()],
         category: None,
     };
-    let note = note_manager.create(input, Some(clip_id.clone()));
+    // Only flag the clipboard item once the note is durably on disk. Marking
+    // it first would leave the item showing "saved as note" while the note
+    // itself failed to persist.
+    let note = note_manager.create(input, Some(clip_id.clone()))?;
     clip_manager.set_saved_as_note(&clip_id, true);
     Ok(note)
 }
@@ -1042,9 +1053,16 @@ pub fn run() {
             stop_proxy,
             get_proxy_logs,
             clear_proxy_logs,
+            set_proxy_allow_lan,
+            clear_proxy_routes,
+            export_proxy_routes,
+            import_proxy_routes,
             list_processes,
             list_ports,
             kill_process,
+            kill_processes,
+            get_process_path,
+            reveal_process_path,
             capture_screenshot,
             trigger_screenshot,
             save_screenshot,
@@ -1054,10 +1072,11 @@ pub fn run() {
             api_delete_node,
             api_save_env,
             api_delete_env,
-            api_set_active_env,
             api_execute,
             api_list_cookies,
             api_clear_cookies,
+            api_save_binary_body,
+            api_reveal_path,
             select_folder,
             select_file
         ])

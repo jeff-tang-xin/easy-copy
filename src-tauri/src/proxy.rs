@@ -21,6 +21,9 @@ pub struct ProxyState {
     pub port: AtomicU16,
     pub logs: Mutex<Vec<ProxyLog>>,
     pub shutdown_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// Bind to `0.0.0.0` instead of `127.0.0.1` when true. Opt-in because it
+    /// turns the proxy into an open relay for the whole LAN.
+    pub allow_lan: AtomicBool,
     /// Path to the config directory for persistence (JSON file).
     pub config_path: Mutex<Option<PathBuf>>,
 }
@@ -50,14 +53,24 @@ impl ProxyState {
         struct PersistedProxyConfig {
             default_target: String,
             routes: Vec<ProxyRoute>,
+            // Missing in configs written before LAN binding existed — serde
+            // fills in `false`, which is the safe (loopback-only) default.
+            #[serde(default)]
+            allow_lan: bool,
         }
         if let Ok(cfg) = serde_json::from_str::<PersistedProxyConfig>(&json) {
             *self.default_target.lock().unwrap_or_else(|e| e.into_inner()) = cfg.default_target;
             *self.routes.lock().unwrap_or_else(|e| e.into_inner()) = cfg.routes;
+            self.allow_lan.store(cfg.allow_lan, Ordering::Relaxed);
         }
     }
 
-    /// Save proxy config to disk (routes + default_target).
+    /// Save proxy config to disk (routes + default_target + allow_lan).
+    ///
+    /// Takes the locks itself, so callers must NOT hold `routes` /
+    /// `default_target` guards across this call — `std::sync::Mutex` is not
+    /// reentrant and doing so self-deadlocks the calling thread. Mutating
+    /// commands should scope their guard (or `drop` it) before persisting.
     pub fn save_config(&self) {
         let path = match self.config_file() {
             Some(p) => p,
@@ -70,10 +83,12 @@ impl ProxyState {
         struct PersistedProxyConfig<'a> {
             default_target: &'a str,
             routes: &'a [ProxyRoute],
+            allow_lan: bool,
         }
         let cfg = PersistedProxyConfig {
             default_target: &self.default_target.lock().unwrap_or_else(|e| e.into_inner()),
             routes: &self.routes.lock().unwrap_or_else(|e| e.into_inner()),
+            allow_lan: self.allow_lan.load(Ordering::Relaxed),
         };
         if let Ok(json) = serde_json::to_string_pretty(&cfg) {
             let _ = std::fs::write(path, json);
@@ -90,6 +105,7 @@ impl Default for ProxyState {
             port: AtomicU16::new(9000),
             logs: Mutex::new(Vec::new()),
             shutdown_tx: Mutex::new(None),
+            allow_lan: AtomicBool::new(false),
             config_path: Mutex::new(None),
         }
     }
@@ -169,8 +185,73 @@ pub fn match_route(path: &str, routes: &[ProxyRoute]) -> (String, Option<String>
 /// because it's written from the axum request task (single-producer in
 /// practice, but `Mutex` is simpler than building a channel for this) and
 /// read from the `get_proxy_logs` command handler.
-fn push_log(state: &ProxyState, log: ProxyLog) {
-    let mut logs = state.logs.lock().unwrap_or_else(|e| e.into_inner());
+/// Build the upstream URL for a forwarded request.
+///
+/// Extracted as a pure function so the prefix-stripping / query-preservation
+/// rules are unit-testable. `uri_path` must be the full path-and-query
+/// (i.e. `parts.uri.path_and_query()`), because the query string has to
+/// survive **both** branches — an earlier version only re-appended it on the
+/// default-target branch, silently dropping `?a=b` for every matched route.
+pub fn build_forward_path(target: &str, uri_path: &str, matched_prefix: Option<&str>) -> String {
+    let base = target.trim_end_matches('/');
+    let (path, query) = match uri_path.split_once('?') {
+        Some((p, q)) => (p, format!("?{}", q)),
+        None => (uri_path, String::new()),
+    };
+    match matched_prefix {
+        Some(prefix) => {
+            let rest = path.strip_prefix(prefix).unwrap_or(path).trim_start_matches('/');
+            format!("{}/{}{}", base, rest, query)
+        }
+        None => format!("{}{}{}", base, path, query),
+    }
+}
+
+// ── Forward clients (cached) ───────────────────────────────────
+
+/// Request body type for forwarded requests. `hyper::body::Bytes` is a
+/// re-export — `bytes` is not a direct dependency of this crate.
+type ForwardBody = http_body_util::Full<hyper::body::Bytes>;
+
+type HttpsClient = hyper_util::client::legacy::Client<
+    hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
+    ForwardBody,
+>;
+type HttpClient = hyper_util::client::legacy::Client<
+    hyper_util::client::legacy::connect::HttpConnector,
+    ForwardBody,
+>;
+
+/// Shared HTTPS forward client (rustls + webpki roots).
+///
+/// webpki rather than native roots: `with_native_roots()` needs the
+/// `native-tokio` feature we don't enable, and publicly-trusted CAs are all
+/// the proxy needs.
+fn https_client() -> &'static HttpsClient {
+    static CLIENT: std::sync::OnceLock<HttpsClient> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        let https = hyper_rustls::HttpsConnectorBuilder::new()
+            .with_webpki_roots()
+            .https_or_http()
+            .enable_http1()
+            .build();
+        hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+            .build(https)
+    })
+}
+
+/// Shared plain-HTTP forward client.
+fn http_client() -> &'static HttpClient {
+    static CLIENT: std::sync::OnceLock<HttpClient> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        let mut http = hyper_util::client::legacy::connect::HttpConnector::new();
+        http.enforce_http(false);
+        hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+            .build(http)
+    })
+}
+
+fn push_log(state: &ProxyState, log: ProxyLog) {    let mut logs = state.logs.lock().unwrap_or_else(|e| e.into_inner());
     logs.insert(0, log);
     if logs.len() > 500 {
         logs.truncate(500);
@@ -190,6 +271,7 @@ pub fn get_proxy_status(state: tauri::State<'_, Arc<ProxyState>>) -> ProxyConfig
             .clone(),
         port: state.port.load(Ordering::Relaxed),
         routes: state.routes.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+        allow_lan: state.allow_lan.load(Ordering::Relaxed),
     }
 }
 
@@ -226,8 +308,13 @@ pub fn upsert_proxy_route(
         existing.path_prefix = route.path_prefix.clone();
         existing.target = route.target.clone();
         existing.enabled = route.enabled;
+        let updated = existing.clone();
+        // Release before persisting: save_config() re-locks `routes` and
+        // std Mutex is not reentrant, so holding the guard here froze the
+        // command thread forever (UI hung on "保存" when editing a route).
+        drop(routes);
         state.save_config();
-        return Ok(existing.clone());
+        return Ok(updated);
     }
     // New route — generate an id if the caller didn't supply one.
     let new_route = if route.id.is_empty() {
@@ -277,9 +364,69 @@ pub fn toggle_proxy_route(
     Ok(new_state)
 }
 
+/// Toggle LAN binding. Takes effect on the next `start_proxy` — rebinding a
+/// live listener would drop in-flight connections, so the UI tells the user
+/// to restart the proxy.
 #[tauri::command]
-pub fn get_proxy_logs(state: tauri::State<'_, Arc<ProxyState>>) -> Vec<ProxyLog> {
-    state
+pub fn set_proxy_allow_lan(
+    allow: bool,
+    state: tauri::State<'_, Arc<ProxyState>>,
+) -> Result<(), String> {
+    state.allow_lan.store(allow, Ordering::Relaxed);
+    state.save_config();
+    Ok(())
+}
+
+/// Remove every route in one shot.
+#[tauri::command]
+pub fn clear_proxy_routes(state: tauri::State<'_, Arc<ProxyState>>) -> Result<(), String> {
+    state.routes.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    state.save_config();
+    Ok(())
+}
+
+/// Export all routes as pretty-printed JSON for backup / sharing.
+#[tauri::command]
+pub fn export_proxy_routes(state: tauri::State<'_, Arc<ProxyState>>) -> Result<String, String> {
+    let routes = state.routes.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    serde_json::to_string_pretty(&routes).map_err(|e| format!("Failed to serialize routes: {}", e))
+}
+
+/// Import routes from JSON produced by `export_proxy_routes`.
+///
+/// Replaces the whole table rather than merging: merging needs a conflict
+/// policy (same prefix, different target) that the UI can't express yet.
+/// Imported entries get fresh ids so a re-import can't collide with itself.
+#[tauri::command]
+pub fn import_proxy_routes(
+    json: String,
+    state: tauri::State<'_, Arc<ProxyState>>,
+) -> Result<usize, String> {
+    let parsed: Vec<ProxyRoute> =
+        serde_json::from_str(&json).map_err(|e| format!("Invalid routes JSON: {}", e))?;
+    for r in &parsed {
+        if r.path_prefix.trim().is_empty() {
+            return Err("Every route needs a non-empty path prefix".to_string());
+        }
+        if r.target.trim().is_empty() {
+            return Err("Every route needs a non-empty target".to_string());
+        }
+    }
+    let imported: Vec<ProxyRoute> = parsed
+        .into_iter()
+        .map(|r| ProxyRoute {
+            id: uuid::Uuid::new_v4().to_string(),
+            ..r
+        })
+        .collect();
+    let count = imported.len();
+    *state.routes.lock().unwrap_or_else(|e| e.into_inner()) = imported;
+    state.save_config();
+    Ok(count)
+}
+
+#[tauri::command]
+pub fn get_proxy_logs(state: tauri::State<'_, Arc<ProxyState>>) -> Vec<ProxyLog> {    state
         .logs
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -323,10 +470,24 @@ pub async fn start_proxy(
     // Wrapped in State so the handler can access it.
     let app = app.with_state(state_ref.clone());
 
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], bind_port));
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .map_err(|e| format!("Failed to bind port {}: {}", bind_port, e))?;
+    // Bind to all interfaces only when the user opted in; loopback otherwise.
+    let bind_ip = if state.allow_lan.load(Ordering::Relaxed) {
+        [0, 0, 0, 0]
+    } else {
+        [127, 0, 0, 1]
+    };
+    let addr = std::net::SocketAddr::from((bind_ip, bind_port));
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            // Roll back the optimistic `running = true` above, otherwise a
+            // failed bind (port already in use) leaves the app believing the
+            // proxy is up and refusing every later start attempt.
+            state.running.store(false, Ordering::Relaxed);
+            *state.shutdown_tx.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            return Err(format!("Failed to bind port {}: {}", bind_port, e));
+        }
+    };
 
     // Spawn the server on the Tokio runtime. The server runs until the
     // shutdown channel fires (from stop_proxy) or the listener dies.
@@ -395,10 +556,9 @@ fn extract_host(url: &str) -> Option<String> {
 async fn proxy_handler(
     axum::extract::State(state): axum::extract::State<Arc<ProxyState>>,
     req: axum::http::Request<axum::body::Body>,
-) -> Result<axum::response::Response<String>, axum::http::StatusCode> {
+) -> Result<axum::response::Response<axum::body::Body>, axum::http::StatusCode> {
     use chrono::Utc;
     use http_body_util::BodyExt;
-    use hyper_util::rt::TokioExecutor;
     use std::time::Instant;
 
     let start = Instant::now();
@@ -445,20 +605,13 @@ async fn proxy_handler(
     };
 
     // Build the forward URL: strip matched prefix, append the rest.
-    let forward_path = match &matched_prefix {
-        Some(prefix) => {
-            let rest = uri_path
-                .strip_prefix(prefix)
-                .unwrap_or(&uri_path)
-                .trim_start_matches('/');
-            format!("{}/{}", target.trim_end_matches('/'), rest)
-        }
-        None => {
-            // Reconstruct with query string intact.
-            let qs = parts.uri.query().map(|q| format!("?{}", q)).unwrap_or_default();
-            format!("{}{}{}", target.trim_end_matches('/'), uri_path, qs)
-        }
-    };
+    // Pass path *and query* so the query survives the matched-route branch too.
+    let path_and_query = parts
+        .uri
+        .path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_else(|| uri_path.clone());
+    let forward_path = build_forward_path(&target, &path_and_query, matched_prefix.as_deref());
 
     // Rebuild the request body from our buffered bytes.
     // hyper 1.x removed `hyper::body::Body`; use `http_body_util::Full` instead
@@ -486,36 +639,17 @@ async fn proxy_handler(
         .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
 
     // Execute the forward request using hyper_util's client.
-    // We pick HTTPS vs HTTP based on the target URL scheme.
     //
-    // The client is constructed per-request rather than cached — not ideal
-    // for throughput, but this tool targets low-volume development use, and
-    // keeping the state struct free of a typed Client avoids having to pin
-    // its generic parameters through Arc<ProxyState>. If perf ever matters,
-    // wrap the client in a dedicated struct and put it behind an Arc too.
-    //
-    // We use `http_body_util::Full<bytes::Bytes>` as the request body type
-    // because `hyper::body::Body` was removed in hyper 1.x. The client's
-    // response body type is determined by the connector; we call `.collect()`
-    // via the `BodyExt` trait to buffer it.
+    // Clients are cached in module-level `OnceLock`s rather than stored in
+    // `ProxyState`: a hyper_util `Client` carries its connector as a generic
+    // parameter, so holding one in the state struct would leak those type
+    // params into every `Arc<ProxyState>` signature. Caching matters because
+    // building a client per request also throws away the connection pool,
+    // forcing a fresh TCP (and TLS) handshake on every single call.
     let forward_result = if forward_path.starts_with("https://") {
-        // HTTPS client with rustls + webpki root certs.
-        // We don't use with_native_roots() because it requires the
-        // `native-tokio` feature which we don't enable; webpki covers
-        // all publicly-trusted CAs which is all the proxy needs.
-        let https = hyper_rustls::HttpsConnectorBuilder::new()
-            .with_webpki_roots()
-            .https_or_http()
-            .enable_http1()
-            .build();
-        let client = hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build(https);
-        client.request(forward_req).await
+        https_client().request(forward_req).await
     } else {
-        // Plain HTTP client.
-        let mut http = hyper_util::client::legacy::connect::HttpConnector::new();
-        http.enforce_http(false);
-        let client = hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build(http);
-        client.request(forward_req).await
+        http_client().request(forward_req).await
     };
 
     let duration_ms = start.elapsed().as_millis() as u64;
@@ -529,12 +663,14 @@ async fn proxy_handler(
                 .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
                 .collect();
 
-            let (resp_parts, resp_body) = resp.into_parts();
+            let (_resp_parts, resp_body) = resp.into_parts();
             let resp_bytes = resp_body
                 .collect()
                 .await
                 .unwrap_or_default()
                 .to_bytes();
+            // Log preview only — never reuse this for the forwarded body.
+            // Lossy/truncated text here must not corrupt what the client gets.
             let response_body = if resp_bytes.len() <= BODY_LIMIT {
                 String::from_utf8(resp_bytes.to_vec()).ok()
             } else {
@@ -553,10 +689,13 @@ async fn proxy_handler(
                 }
                 response_builder = response_builder.header(k, v);
             }
-            let body_str = response_body.clone().unwrap_or_default();
+            // Forward the original bytes verbatim. Building the body from the
+            // logging preview (a lossy String) corrupted every binary payload
+            // — images, gzip, protobuf — and truncated anything over the log
+            // limit.
             let response = response_builder
-                .body(body_str)
-                .unwrap_or_else(|_| axum::http::Response::new(String::new()));
+                .body(axum::body::Body::from(resp_bytes.clone()))
+                .unwrap_or_else(|_| axum::http::Response::new(axum::body::Body::empty()));
 
             // Log the completed request/response pair.
             let log = ProxyLog {
@@ -604,8 +743,8 @@ async fn proxy_handler(
             let body = format!("Bad Gateway: {}", error_msg);
             let resp = axum::http::Response::builder()
                 .status(axum::http::StatusCode::BAD_GATEWAY)
-                .body(body)
-                .unwrap_or_else(|_| axum::http::Response::new(String::new()));
+                .body(axum::body::Body::from(body))
+                .unwrap_or_else(|_| axum::http::Response::new(axum::body::Body::empty()));
             Ok(resp)
         }
     }
@@ -616,6 +755,74 @@ async fn proxy_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: `save_config()` re-locks `routes`, and `std::sync::Mutex`
+    /// is not reentrant. `upsert_proxy_route`'s edit branch used to call it
+    /// while still holding the guard, hanging the command thread forever
+    /// (the UI froze when saving an edited route). A `config_path` must be
+    /// set — otherwise save_config() early-returns before taking any lock and
+    /// the deadlock cannot reproduce.
+    #[test]
+    fn save_config_after_dropping_routes_lock_does_not_deadlock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = std::env::temp_dir().join(format!("ec_proxy_dl_{}", std::process::id()));
+        let state = Arc::new(ProxyState::default());
+        *state.config_path.lock().unwrap_or_else(|e| e.into_inner()) = Some(dir.clone());
+
+        let (tx, rx) = mpsc::channel();
+        let worker = Arc::clone(&state);
+        std::thread::spawn(move || {
+            // Mirror the fixed edit branch: mutate under the guard, drop it,
+            // then persist.
+            let mut routes = worker.routes.lock().unwrap_or_else(|e| e.into_inner());
+            routes.push(route("r1", "/api", "http://localhost:3000", true));
+            drop(routes);
+            worker.save_config();
+            let _ = tx.send(());
+        });
+
+        assert!(
+            rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "save_config() deadlocked"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── build_forward_path ──────────────────────────────────────
+
+    #[test]
+    fn build_forward_path_strips_matched_prefix() {
+        let out = build_forward_path("http://localhost:3000", "/api/users", Some("/api"));
+        assert_eq!(out, "http://localhost:3000/users");
+    }
+
+    /// The bug this function was extracted for: the matched-route branch used
+    /// to drop the query string entirely.
+    #[test]
+    fn build_forward_path_keeps_query_on_matched_route() {
+        let out = build_forward_path("http://localhost:3000", "/api/users?page=2&q=x", Some("/api"));
+        assert_eq!(out, "http://localhost:3000/users?page=2&q=x");
+    }
+
+    #[test]
+    fn build_forward_path_keeps_query_on_default_target() {
+        let out = build_forward_path("http://localhost:8080", "/health?verbose=1", None);
+        assert_eq!(out, "http://localhost:8080/health?verbose=1");
+    }
+
+    #[test]
+    fn build_forward_path_trims_duplicate_slashes() {
+        let out = build_forward_path("http://localhost:3000/", "/api/users", Some("/api"));
+        assert_eq!(out, "http://localhost:3000/users");
+    }
+
+    #[test]
+    fn build_forward_path_handles_exact_prefix_match() {
+        let out = build_forward_path("http://localhost:3000", "/api", Some("/api"));
+        assert_eq!(out, "http://localhost:3000/");
+    }
 
     fn route(id: &str, prefix: &str, target: &str, enabled: bool) -> ProxyRoute {
         ProxyRoute {
