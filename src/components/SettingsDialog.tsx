@@ -5,18 +5,9 @@ import {
 } from "./Icons";
 import { friendlyError } from "../hooks/friendlyError";
 import type { ToastKind } from "../hooks/useToast";
-
-export interface AppConfig {
-  max_items: number;
-  poll_interval_ms: number;
-  clipboard_shortcut: string;
-  notes_shortcut: string;
-  tools_shortcut: string;
-  screenshot_shortcut: string;
-  api_shortcut: string;
-  copy_on_double_click: boolean;
-  storage_root: string | null;
-}
+// 复用 useClipboard 导出的 AppConfig：此处原本自带一份字段完全相同的副本，
+// 两份定义各自演进迟早会漂移（后端只有一个 Config 结构），故统一为单一来源。
+import type { AppConfig } from "../hooks/useClipboard";
 
 interface SettingsDialogProps {
   open: boolean;
@@ -48,10 +39,28 @@ export function SettingsDialog({
   });
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  // In-progress text for the two number inputs, or null when not being edited.
+  //
+  // Why a separate draft instead of writing straight to `config`: these fields
+  // must be clamped to a valid range, but clamping on every keystroke makes
+  // them impossible to use — typing "2000" got rewritten to "50" as soon as the
+  // first "2" landed, and clearing the box snapped to 500. The draft holds the
+  // raw text while the user types; the value is parsed and clamped on blur.
+  //
+  // Note `draft` takes priority in `value={draft ?? config.x}`, so a stale draft
+  // would mask freshly loaded config. `if (!open) return null` only skips
+  // rendering — it does NOT unmount, so hook state survives a close/reopen when
+  // the parent keeps this mounted. The open effect below resets both drafts for
+  // that reason; do not rely on unmounting to clear them.
+  const [maxItemsDraft, setMaxItemsDraft] = useState<string | null>(null);
+  const [pollDraft, setPollDraft] = useState<string | null>(null);
 
   // Load config whenever the dialog opens.
   useEffect(() => {
     if (!open) return;
+    // Drop any abandoned edit text so the reloaded config is what shows.
+    setMaxItemsDraft(null);
+    setPollDraft(null);
     let cancelled = false;
     setLoading(true);
     invoke<AppConfig>("get_config")
@@ -63,12 +72,54 @@ export function SettingsDialog({
 
   if (!open) return null;
 
+  // Clamp bounds mirror the backend (`clamp_max_items` 50..=2000 and
+  // `clamp_poll_interval` 200..=60000). Keeping them in sync matters: a value
+  // the front-end accepts but the backend rewrites would silently disagree with
+  // what the user sees.
+  const clampMaxItems = (n: number) => Math.min(2000, Math.max(50, n));
+  const clampPoll = (n: number) => Math.min(60000, Math.max(200, n));
+
+  // Resolve a draft string to a committed, clamped number. Empty/garbage input
+  // falls back to the value already in config rather than a magic constant, so
+  // clearing the box and clicking away restores what was there instead of
+  // teleporting to 500.
+  const commit = (draft: string | null, current: number, clamp: (n: number) => number) => {
+    if (draft === null) return current;
+    const n = parseInt(draft, 10);
+    return Number.isNaN(n) ? current : clamp(n);
+  };
+
+  const onMaxItemsBlur = () => {
+    // 函数式更新：blur 与其它异步 setConfig（如 get_config 回填、选择文件夹）
+    // 可能交错，闭包快照式 `{...config}` 会把对方的更新整份覆盖掉。
+    setConfig((c) => ({ ...c, max_items: commit(maxItemsDraft, c.max_items, clampMaxItems) }));
+    setMaxItemsDraft(null);
+  };
+  const onPollBlur = () => {
+    setConfig((c) => ({
+      ...c,
+      poll_interval_ms: commit(pollDraft, c.poll_interval_ms, clampPoll),
+    }));
+    setPollDraft(null);
+  };
+
   const handleSave = async () => {
+    // Saving via keyboard (or clicking straight from a focused input) can fire
+    // before blur commits, so fold any pending draft in here rather than
+    // relying on the blur handlers' async state updates.
+    const merged: AppConfig = {
+      ...config,
+      max_items: commit(maxItemsDraft, config.max_items, clampMaxItems),
+      poll_interval_ms: commit(pollDraft, config.poll_interval_ms, clampPoll),
+    };
+    setConfig(merged);
+    setMaxItemsDraft(null);
+    setPollDraft(null);
     setSaving(true);
     try {
-      await invoke("set_config", { config });
+      await invoke("set_config", { config: merged });
       showToast("设置已保存");
-      onSaved?.(config);
+      onSaved?.(merged);
       onClose();
     } catch (err) {
       showToast(friendlyError(err, "保存失败"), "error");
@@ -80,7 +131,10 @@ export function SettingsDialog({
   const handleSelectFolder = async () => {
     try {
       const sel = await invoke<string>("select_folder");
-      if (sel) setConfig({ ...config, storage_root: sel });
+      // Functional update: `config` captured before the await is stale by the
+      // time the folder picker closes, so spreading it would clobber any edit
+      // committed while the dialog was open.
+      if (sel) setConfig((c) => ({ ...c, storage_root: sel }));
     } catch (e) {
       showToast(friendlyError(e, "选择文件夹失败"), "error");
     }
@@ -103,14 +157,10 @@ export function SettingsDialog({
                 className="settings-input"
                 type="number"
                 min="50"
-                max="5000"
-                value={config.max_items}
-                onChange={(e) =>
-                  setConfig({
-                    ...config,
-                    max_items: Math.max(50, parseInt(e.target.value) || 500),
-                  })
-                }
+                max="2000"
+                value={maxItemsDraft ?? config.max_items}
+                onChange={(e) => setMaxItemsDraft(e.target.value)}
+                onBlur={onMaxItemsBlur}
               />
             </div>
 
@@ -120,14 +170,10 @@ export function SettingsDialog({
                 className="settings-input"
                 type="number"
                 min="200"
-                max="5000"
-                value={config.poll_interval_ms}
-                onChange={(e) =>
-                  setConfig({
-                    ...config,
-                    poll_interval_ms: Math.max(200, parseInt(e.target.value) || 500),
-                  })
-                }
+                max="60000"
+                value={pollDraft ?? config.poll_interval_ms}
+                onChange={(e) => setPollDraft(e.target.value)}
+                onBlur={onPollBlur}
               />
             </div>
 

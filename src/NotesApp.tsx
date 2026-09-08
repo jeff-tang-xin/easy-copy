@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo, memo } from "react";
+import type { MouseEvent as ReactMouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useTheme } from "./hooks/useTheme";
@@ -7,6 +8,7 @@ import { friendlyError } from "./hooks/friendlyError";
 import ReactMarkdown from "react-markdown";
 import { renderToStaticMarkup } from "react-dom/server";
 import remarkGfm from "remark-gfm";
+import { IconLink, IconPin } from "./components/Icons";
 import "./App.css";
 import "./NotesApp.css";
 
@@ -103,6 +105,61 @@ function formatDate(iso: string): string {
   return d.toLocaleDateString();
 }
 
+// Strip markdown markers for a short content preview (first line-ish, ~80 chars).
+// 必须放在模块作用域：原先它是 NotesApp 内部的普通函数，每次渲染都是新引用，
+// 一旦作为 prop 传给 memo 化的 NoteRow 就会让 memo 完全失效。
+function previewText(content: string): string {
+  const t = content.replace(/[#>*_`~\-]+/g, " ").replace(/\s+/g, " ").trim();
+  return t.length > 80 ? t.slice(0, 80) + "…" : t;
+}
+
+// 列表行。用 React.memo 包住，配合稳定的回调，使「切换选中」只重渲染
+// 旧选中行 + 新选中行，而不是整份列表。
+// 关键点：这里只接 isActive 布尔值，不接当前选中的 id —— 传 id 的话每行的 props
+// 都会随选中变化，memo 就白做了。
+const NoteRow = memo(function NoteRow({
+  note,
+  isActive,
+  onSelect,
+  onContextMenu,
+}: {
+  note: Note;
+  isActive: boolean;
+  onSelect: (id: string) => void;
+  onContextMenu: (id: string, x: number, y: number) => void;
+}) {
+  // 内联箭头在组件内部用 note 闭包生成。若从父级 map 里传下来，
+  // 每次父级渲染都是新函数引用，同样会击穿 memo。
+  const handleClick = () => onSelect(note.id);
+  const handleContextMenu = (e: ReactMouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onContextMenu(note.id, e.clientX, e.clientY);
+  };
+  const preview = previewText(note.content);
+  return (
+    <div
+      className={`notes-item ${isActive ? "active" : ""}`}
+      onClick={handleClick}
+      onContextMenu={handleContextMenu}
+    >
+      <div className="notes-item-title">
+        {note.pinned && <span className="notes-pin"><IconPin /></span>}
+        {note.title || UNTITLED}
+      </div>
+      {preview && <div className="notes-item-preview">{preview}</div>}
+      <div className="notes-item-meta">
+        <span>{formatDate(note.updated_at)}</span>
+        {note.tags.length > 0 && (
+          <span className="notes-item-tags">
+            {note.tags.slice(0, 3).map((t) => `#${t}`).join(" ")}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+});
+
 export default function NotesApp() {
   const [notes, setNotes] = useState<Note[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -191,11 +248,13 @@ export default function NotesApp() {
       return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
     });
 
-  // Strip markdown markers for a short content preview (first line-ish, ~80 chars)
-  const previewText = (content: string): string => {
-    const t = content.replace(/[#>*_`~\-]+/g, " ").replace(/\s+/g, " ").trim();
-    return t.length > 80 ? t.slice(0, 80) + "…" : t;
-  };
+  // NoteRow 是 memo 化的，回调必须引用稳定，否则每次父级渲染都击穿 memo。
+  // 两个 setter 都是 React 保证稳定的引用，所以 deps 可以为空。
+  const handleSelectNote = useCallback((id: string) => setSelectedId(id), []);
+  const handleNoteContextMenu = useCallback(
+    (id: string, x: number, y: number) => setNoteMenu({ x, y, id }),
+    [],
+  );
 
   const filtered = useMemo(() => {
     // 1) category gate
@@ -686,30 +745,13 @@ ${innerHtml}
             </div>
           )}
           {filtered.map((n) => (
-            <div
+            <NoteRow
               key={n.id}
-              className={`notes-item ${n.id === selectedId ? "active" : ""}`}
-              onClick={() => setSelectedId(n.id)}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                setNoteMenu({ x: e.clientX, y: e.clientY, id: n.id });
-              }}
-            >
-              <div className="notes-item-title">
-                {n.pinned && <span className="notes-pin">📌</span>}
-                {n.title || UNTITLED}
-              </div>
-              {previewText(n.content) && (
-                <div className="notes-item-preview">{previewText(n.content)}</div>
-              )}
-              <div className="notes-item-meta">
-                <span>{formatDate(n.updated_at)}</span>
-                {n.tags.length > 0 && (
-                  <span className="notes-item-tags">{n.tags.slice(0, 3).map((t) => `#${t}`).join(" ")}</span>
-                )}
-              </div>
-            </div>
+              note={n}
+              isActive={n.id === selectedId}
+              onSelect={handleSelectNote}
+              onContextMenu={handleNoteContextMenu}
+            />
           ))}
         </div>
         <div className="notes-list-status">
@@ -821,7 +863,7 @@ ${innerHtml}
                 <button className="notes-format-btn" onClick={() => insertAtLineStart("1. ")} title="Numbered list">1. List</button>
                 <button className="notes-format-btn" onClick={() => insertAtLineStart("> ")} title="Blockquote">" Quote</button>
                 <span className="notes-format-sep" />
-                <button className="notes-format-btn" onClick={() => wrapSelection("[", "](https://)")} title="Link">🔗 Link</button>
+                <button className="notes-format-btn" onClick={() => wrapSelection("[", "](https://)")} title="Link"><IconLink /> Link</button>
                 <button className="notes-format-btn" onClick={() => wrapSelection("```\n", "\n```")} title="Code block">{ } Block</button>
               </div>
             )}

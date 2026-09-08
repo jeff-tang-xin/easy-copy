@@ -1,4 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
+import { IconChevron } from "./components/Icons";
 import "./JsonView.css";
 
 /* =============================================================
@@ -265,7 +266,9 @@ function JsonNode({ name, value, depth, comma, query, force, path }: NodeProps) 
   return (
     <div>
       <div className="jv-row jv-clickable" onClick={() => setOpen((o) => !o)}>
-        <span className={`jv-caret ${open ? "open" : ""}`}>▶</span>
+        <span className={`jv-caret ${open ? "open" : ""}`}>
+          <IconChevron />
+        </span>
         {keyTokens}
         <Token kind="punct" text={openBrace} />
         {!open && (

@@ -79,7 +79,7 @@
   z-index: 20;
   background: var(--bg-secondary, #1e1e2e);
   border: 1px solid var(--border-color, #333);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 6px 8px;
   box-shadow: 0 4px 16px rgba(0,0,0,0.4);
 }
@@ -90,7 +90,7 @@
   padding: 6px 10px;
   font-size: 14px;
   border: 1px solid var(--border-color, #333);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--bg-primary, #11111b);
   outline: none;
   min-width: 180px;
@@ -115,7 +115,7 @@
   padding: 6px 12px;
   font-size: 14px;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--accent, #3b82f6);
   color: #fff;
   cursor: pointer;
@@ -164,7 +164,7 @@
   background: transparent;
   color: rgba(230, 233, 245, 0.85);
   cursor: pointer;
-  transition: background 0.14s ease, color 0.14s ease, transform 0.1s ease;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease), transform var(--dur-fast) var(--ease);
 }
 
 .sc-tool-btn:hover {
@@ -223,7 +223,7 @@
   background: rgba(30, 30, 46, 0.88);
   backdrop-filter: blur(8px);
   border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
   z-index: 30;
   pointer-events: none;
@@ -246,7 +246,7 @@
   cursor: pointer;
   padding: 0;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25) inset;
-  transition: transform 0.12s ease, border-color 0.12s ease;
+  transition: transform var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
 }
 
 .sc-color-dot:hover { transform: scale(1.15); }
@@ -271,10 +271,10 @@
   align-items: center;
   justify-content: center;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: transparent;
   cursor: pointer;
-  transition: background 0.14s ease;
+  transition: background var(--dur) var(--ease);
 }
 
 .sc-size-btn:hover { background: rgba(255, 255, 255, 0.1); }
@@ -367,7 +367,7 @@
   color: #fff;
   background: rgba(24, 24, 37, 0.9);
   border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   white-space: nowrap;
   pointer-events: none;
   user-select: none;
@@ -383,7 +383,7 @@
   flex-direction: column;
   background: var(--bg-secondary, #1e1e2e);
   border: 1px solid var(--accent, #3b82f6);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   overflow: hidden;
 }
 
@@ -393,7 +393,8 @@
   justify-content: space-between;
   height: 32px;
   padding: 0 8px;
-  background: rgba(30, 30, 46, 0.95);
+  background: var(--bg-tertiary, #1e1e2e);
+  border-bottom: 1px solid var(--border-subtle, transparent);
   cursor: move;
   user-select: none;
   flex-shrink: 0;
@@ -411,7 +412,7 @@
   font-size: 14px;
   cursor: pointer;
   padding: 2px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 
 .sc-pin-close:hover {
@@ -426,3 +427,17 @@
   object-fit: contain;
   display: block;
 }
+
+/* ===== Focus Ring（统一键盘焦点提示） =====
+   与 App.css 同一套规则：只用既有 --ring token，用 :focus-visible 而非
+   :focus 以免鼠标点击也弹环。已有自定义 focus 样式的选择器特异性更高，
+   不会被这里覆盖成双环。 */
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+[tabindex]:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+

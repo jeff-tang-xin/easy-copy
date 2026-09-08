@@ -78,13 +78,18 @@
 
 /* Disclosure triangle for objects/arrays. */
 .jv-caret {
-  display: inline-block;
+  /* 内容从 ▶ 字形换成 <svg> 后，font-size / vertical-align 的字形微调不再适用：
+   * inline-flex 把图标在固定 12x12 的槽位里居中，rotate 的 transform-origin
+   * 才正好落在箭头中心，展开动画不会绕着偏心点甩。 */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 12px;
-  font-size: 8px;
+  height: 12px;
   color: var(--text-muted);
   transition: transform var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
   transform: rotate(0deg);
-  vertical-align: 1px;
+  vertical-align: middle;
 }
 
 .jv-caret.open {

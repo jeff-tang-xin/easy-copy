@@ -3,7 +3,15 @@
 
 .api-app {
   display: grid;
-  grid-template-columns: 260px minmax(360px, 1fr) minmax(360px, 1fr);
+  grid-template-columns: 260px minmax(0, 1fr);
+  /* Rows are driven by --api-split-top (a percentage set by
+     useVerticalSplit) so the divider survives window resizing;
+     the middle track is the drag handle itself. */
+  grid-template-rows: minmax(0, var(--api-split-top, 50%)) auto minmax(0, 1fr);
+  grid-template-areas:
+    "sidebar editor"
+    "sidebar splitter"
+    "sidebar response";
   height: 100vh;
   background-color: var(--bg-primary);
   color: var(--text-primary);
@@ -18,13 +26,14 @@
 .api-app ::-webkit-scrollbar-track { background: transparent; }
 .api-app ::-webkit-scrollbar-thumb {
   background: var(--scrollbar-thumb);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 .api-app ::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-hover); }
 
 /* ── Sidebar ────────────────────────────────────────────── */
 
 .api-sidebar {
+  grid-area: sidebar;
   display: flex;
   flex-direction: column;
   background-color: var(--bg-secondary);
@@ -37,7 +46,6 @@
   flex-direction: column;
   overflow: hidden;
 }
-.api-sidebar-section:last-child { border-top: 1px solid var(--border-color); }
 
 .api-sidebar-header {
   display: flex;
@@ -70,8 +78,8 @@
   border: 1px solid transparent;
   color: var(--text-muted);
   cursor: pointer;
-  border-radius: 6px;
-  transition: all 0.15s ease;
+  border-radius: var(--radius-sm);
+  transition: all var(--dur) var(--ease);
   padding: 0;
 }
 .api-icon-btn:hover {
@@ -99,9 +107,9 @@
   padding: 5px 8px;
   cursor: pointer;
   font-size: 13px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   margin: 1px 0;
-  transition: background-color 0.1s ease;
+  transition: background-color var(--dur-fast) var(--ease);
   user-select: none;
 }
 
@@ -113,14 +121,20 @@
 }
 
 .api-tree-icon {
-  font-size: 10px;
   color: var(--text-muted);
   width: 14px;
+  height: 14px;
   display: inline-flex;
+  align-items: center;
   justify-content: center;
-  transition: transform 0.15s ease;
+  /* IconChevron points right at rest, so the expanded state is the rotated
+     one (down) and collapsed is the identity — the inverse of the old ▼ glyph.
+     inline-flex + a fixed box keeps transform-origin at the icon's centre so
+     the arrow spins in place instead of swinging around a text baseline. */
+  transform: rotate(90deg);
+  transition: transform var(--dur) var(--ease);
 }
-.api-tree-row.collapsed .api-tree-icon { transform: rotate(-90deg); }
+.api-tree-row.collapsed .api-tree-icon { transform: rotate(0deg); }
 
 .api-tree-name {
   flex: 1;
@@ -139,7 +153,7 @@
   align-items: center;
   justify-content: center;
   padding: 1px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   font-size: 9px;
   font-weight: 700;
   letter-spacing: 0.3px;
@@ -180,9 +194,9 @@
   cursor: pointer;
   font-size: 12px;
   gap: 6px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   margin: 1px 0;
-  transition: background-color 0.1s ease;
+  transition: background-color var(--dur-fast) var(--ease);
   user-select: none;
 }
 
@@ -222,10 +236,10 @@
   border: 1px solid var(--border-color);
   color: var(--text-muted);
   cursor: pointer;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   font-size: 12px;
   padding: 0;
-  transition: all 0.15s ease;
+  transition: all var(--dur) var(--ease);
 }
 .api-mini-btn:hover { color: var(--red); border-color: var(--red); }
 
@@ -235,19 +249,20 @@
   color: var(--text-secondary);
   cursor: pointer;
   padding: 4px 10px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   font-size: 11px;
   margin-top: 4px;
-  transition: all 0.15s ease;
+  transition: all var(--dur) var(--ease);
 }
 .api-env-add-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
 
 /* ── Editor (middle) ────────────────────────────────────── */
 
 .api-editor {
+  grid-area: editor;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-color);
   overflow: hidden;
   background: var(--bg-primary);
 }
@@ -276,7 +291,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  transition: color 0.15s ease;
+  transition: color var(--dur) var(--ease);
 }
 .api-editor-name:hover { color: var(--accent); }
 .api-editor-name svg { width: 12px; height: 12px; opacity: 0.5; }
@@ -296,14 +311,15 @@
   color: var(--text-primary);
   border: 1px solid var(--border-color);
   padding: 8px 12px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   font-weight: 700;
   font-family: "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
   font-size: 12px;
-  min-width: 100px;
+  min-width: 0;
+  flex-shrink: 0;
   cursor: pointer;
   outline: none;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
 .api-method-select:focus {
   border-color: var(--accent);
@@ -313,17 +329,38 @@
 /* Method-specific accent colors for the select dropdown */
 .api-method-select option { font-weight: 700; }
 
+.api-env-select {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  min-width: 0;
+  max-width: 160px;
+  flex-shrink: 1;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  outline: none;
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+}
+.api-env-select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-dim);
+}
+
 .api-url-input {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 0;
   background: var(--bg-tertiary);
   color: var(--text-primary);
   border: 1px solid var(--border-color);
   padding: 8px 12px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   font-family: "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
   font-size: 13px;
   outline: none;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
 .api-url-input::placeholder { color: var(--text-muted); }
 .api-url-input:focus {
@@ -335,18 +372,19 @@
   background: var(--accent);
   color: #fff;
   border: none;
-  padding: 8px 28px;
-  border-radius: 8px;
+  padding: 8px 20px;
+  border-radius: var(--radius-md);
   font-weight: 600;
   cursor: pointer;
   font-size: 13px;
-  transition: background-color 0.15s ease, transform 0.1s ease, box-shadow 0.15s ease;
+  transition: background-color var(--dur) var(--ease), transform var(--dur-fast) var(--ease), box-shadow var(--dur) var(--ease);
   white-space: nowrap;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  flex-shrink: 0;
+  box-shadow: var(--shadow-md);
 }
 .api-send-btn:hover:not(:disabled) {
   background: var(--accent-hover);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--shadow-md);
 }
 .api-send-btn:active:not(:disabled) { transform: scale(0.97); }
 .api-send-btn:disabled { opacity: 0.4; cursor: not-allowed; box-shadow: none; }
@@ -370,7 +408,7 @@
   font-size: 12px;
   font-weight: 500;
   border-bottom: 2px solid transparent;
-  transition: color 0.15s ease, border-color 0.15s ease;
+  transition: color var(--dur) var(--ease), border-color var(--dur) var(--ease);
 }
 .api-tab:hover { color: var(--text-secondary); }
 .api-tab.active {
@@ -382,7 +420,7 @@
   margin-left: 4px;
   font-size: 10px;
   padding: 0 5px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-active);
   color: var(--text-muted);
 }
@@ -428,11 +466,11 @@
   color: var(--text-primary);
   border: 1px solid var(--border-color);
   padding: 6px 10px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   font-family: "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
   font-size: 12px;
   outline: none;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
 .api-kv-input::placeholder { color: var(--text-muted); }
 .api-kv-input:focus {
@@ -450,9 +488,9 @@
   border: 1px solid transparent;
   color: var(--text-muted);
   cursor: pointer;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   font-size: 14px;
-  transition: all 0.15s ease;
+  transition: all var(--dur) var(--ease);
   padding: 0;
 }
 .api-kv-delete:hover { color: var(--red); border-color: var(--border-color); }
@@ -466,11 +504,11 @@
   color: var(--text-secondary);
   cursor: pointer;
   padding: 6px 14px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   font-size: 12px;
   margin-top: 4px;
   align-self: flex-start;
-  transition: all 0.15s ease;
+  transition: all var(--dur) var(--ease);
 }
 .api-kv-add:hover { background: var(--bg-hover); color: var(--text-primary); }
 
@@ -827,7 +865,7 @@
   font-size: 11px;
   color: var(--text-muted);
   background: var(--bg-tertiary);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 8px 12px;
   line-height: 1.6;
 }
@@ -837,6 +875,25 @@
   border-radius: 3px;
   font-family: "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
   font-size: 11px;
+}
+/* Action row for the binary-response hint: previously the hint was a dead end
+   that told the user the body existed but gave no way to get at it. */
+.api-hint-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.api-btn-sm {
+  padding: 4px 10px;
+  font-size: 11px;
+}
+.api-saved-path {
+  margin-top: 6px;
+  font-family: "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  font-size: 10px;
+  color: var(--text-secondary);
+  word-break: break-all;
 }
 
 /* ── Form-Data Editor ──────────────────────────────────── */
@@ -853,7 +910,7 @@
   color: var(--text-primary);
   border: 1px solid var(--border-color);
   padding: 6px 8px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   font-size: 11px;
   outline: none;
   cursor: pointer;
@@ -875,11 +932,11 @@
   color: var(--text-secondary);
   border: 1px solid var(--border-color);
   padding: 6px 10px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   font-size: 11px;
   cursor: pointer;
   white-space: nowrap;
-  transition: all 0.15s ease;
+  transition: all var(--dur) var(--ease);
 }
 .api-form-browse-btn:hover { color: var(--text-primary); border-color: var(--accent); }
 
@@ -908,28 +965,16 @@
   color: var(--text-secondary);
   border: 1px solid var(--border-color);
   padding: 6px 14px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   font-size: 12px;
   cursor: pointer;
   white-space: nowrap;
-  transition: all 0.15s ease;
+  transition: all var(--dur) var(--ease);
 }
 .api-browse-btn:hover { color: var(--text-primary); border-color: var(--accent); }
 
 /* ── Env Banner ─────────────────────────────────────────── */
 
-.api-env-banner {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  background: var(--accent-dim);
-  border: 1px solid var(--accent);
-  padding: 6px 12px;
-  border-radius: 8px;
-  font-size: 11px;
-  color: var(--accent);
-  margin: 0 16px;
-}
 
 /* ── Placeholder / Empty States ──────────────────────────── */
 
@@ -971,16 +1016,16 @@
   color: #fff;
   border: none;
   padding: 9px 20px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   cursor: pointer;
   font-size: 13px;
   font-weight: 500;
-  transition: background-color 0.15s ease, transform 0.1s ease, box-shadow 0.15s ease;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  transition: background-color var(--dur) var(--ease), transform var(--dur-fast) var(--ease), box-shadow var(--dur) var(--ease);
+  box-shadow: var(--shadow-md);
 }
 .api-btn:hover {
   background: var(--accent-hover);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--shadow-md);
 }
 .api-btn:active { transform: scale(0.97); }
 
@@ -1001,10 +1046,39 @@
 /* ── Response (right) ────────────────────────────────────── */
 
 .api-response {
+  grid-area: response;
   display: flex;
   flex-direction: column;
   background: var(--bg-primary);
   overflow: hidden;
+}
+
+.api-splitter {
+  grid-area: splitter;
+  height: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-tertiary);
+  cursor: row-resize;
+  flex-shrink: 0;
+  transition: background var(--dur-fast) var(--ease);
+  user-select: none;
+}
+.api-splitter:hover,
+.api-splitter[data-dragging="true"] {
+  background: var(--accent-dim);
+}
+.api-splitter-grip {
+  width: 32px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--border-color);
+  transition: background var(--dur-fast) var(--ease);
+}
+.api-splitter:hover .api-splitter-grip,
+.api-splitter[data-dragging="true"] .api-splitter-grip {
+  background: var(--accent);
 }
 
 .api-response-inner {
@@ -1027,7 +1101,7 @@
   display: inline-flex;
   align-items: center;
   padding: 4px 12px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   font-size: 12px;
   font-weight: 700;
   font-family: "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
@@ -1055,7 +1129,7 @@
 .api-view-toggle {
   display: flex;
   border: 1px solid var(--border-color);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   overflow: hidden;
 }
 
@@ -1066,7 +1140,7 @@
   cursor: pointer;
   padding: 4px 12px;
   font-size: 12px;
-  transition: all 0.15s ease;
+  transition: all var(--dur) var(--ease);
 }
 .api-view-toggle button:not(:last-child) {
   border-right: 1px solid var(--border-color);
@@ -1095,12 +1169,12 @@
 .api-copy-btn {
   background: transparent;
   border: 1px solid var(--border-color);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-muted);
   cursor: pointer;
   padding: 4px 12px;
   font-size: 12px;
-  transition: all 0.15s ease;
+  transition: all var(--dur) var(--ease);
 }
 .api-copy-btn:hover {
   color: var(--text-primary);
@@ -1145,7 +1219,7 @@
 .api-pretty {
   background: var(--bg-secondary);
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 0;
   overflow-x: auto;
   font-size: 12px;
@@ -1164,7 +1238,7 @@
 .api-raw {
   background: var(--bg-secondary);
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 12px;
   overflow-x: auto;
   font-size: 12px;
@@ -1204,7 +1278,7 @@
   background: var(--danger-bg);
   color: var(--red);
   border: 1px solid var(--red);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 10px 14px;
   margin: 12px 16px;
   font-size: 12px;
@@ -1248,11 +1322,11 @@
 .api-modal {
   background: var(--bg-secondary);
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   padding: 20px 24px;
   min-width: 380px;
   max-width: 500px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--shadow-lg);
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -1283,10 +1357,10 @@
   color: var(--text-primary);
   border: 1px solid var(--border-color);
   padding: 10px 14px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   font-size: 14px;
   outline: none;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
   width: 100%;
   box-sizing: border-box;
 }
@@ -1314,7 +1388,7 @@
   max-height: 360px;
   overflow-y: auto;
   border: 1px solid var(--border-color);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--bg-primary);
   padding: 4px;
   display: flex;
@@ -1330,12 +1404,12 @@
   padding: 6px 8px;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   color: var(--text-primary);
   font-size: 13px;
   text-align: left;
   cursor: pointer;
-  transition: background 0.12s ease, border-color 0.12s ease;
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
 }
 
 .api-moveto-item:hover {
@@ -1372,16 +1446,206 @@
   cursor: not-allowed;
 }
 
+/* ===== Env Manager Modal ===== */
+
+/* Trigger lives in the editor topbar (right side, opposite the name). */
+.api-editor-env-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  max-width: 200px;
+  padding: 5px 10px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+
+.api-editor-env-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
+
+/* Wider than the default modal: variables are a two-column table and
+   values are usually URLs, which the old sidebar could not display. */
+.api-env-modal {
+  min-width: 640px;
+  max-width: 760px;
+}
+
+.api-env-modal-body {
+  display: flex;
+  gap: 12px;
+  min-height: 300px;
+  max-height: 420px;
+}
+
+.api-env-modal-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 170px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+}
+
+.api-env-modal-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 6px;
+  border-radius: var(--radius-xs);
+  border: 1px solid transparent;
+  font-size: 13px;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+
+.api-env-modal-item:hover {
+  background: var(--bg-hover);
+}
+
+.api-env-modal-item.viewing {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+}
+
+.api-env-modal-name {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.api-env-modal-vars {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+}
+
+.api-env-modal-varhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* Three stacked sections now (base URL / shared headers / vars), so the
+   right pane scrolls as a whole rather than each list scrolling itself —
+   nested scroll areas made the short header list nearly unusable. */
+.api-env-modal-varlist {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-right: 4px;
+}
+
+/* Inherited env headers: read-only, visually recessive so they read as
+   context rather than as editable rows of the list below. */
+.api-inherited-headers {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  border: 1px dashed var(--border-color);
+  border-radius: var(--radius-sm);
+  background: rgba(127, 127, 127, 0.06);
+}
+
+.api-inherited-title {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 2px;
+}
+
+.api-inherited-row {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  min-width: 0;
+}
+
+.api-inherited-k {
+  flex: 0 0 34%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.api-inherited-v {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.api-env-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.api-env-section:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.api-env-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.api-env-baseurl {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.api-env-modal-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 8px 0 4px;
+}
+
 
 /* ===== Context Menu ===== */
 .api-context-menu {
   position: fixed;
   background: var(--bg-secondary);
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 4px;
   min-width: 160px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--shadow-md);
   z-index: 10000;
   display: flex;
   flex-direction: column;
@@ -1393,14 +1657,14 @@
   border: none;
   color: var(--text-primary);
   padding: 8px 12px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   font-size: 13px;
   text-align: left;
   display: flex;
   align-items: center;
   gap: 8px;
-  transition: background-color 0.1s ease;
+  transition: background-color var(--dur-fast) var(--ease);
 }
 .api-context-item:hover {
   background: var(--bg-hover);
@@ -1424,52 +1688,19 @@
 
 .api-tree-children {
   margin-left: 16px;
-  border-radius: 4px;
-  transition: background 120ms ease, box-shadow 120ms ease;
+  border-radius: var(--radius-xs);
+  transition: background var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
 }
 
-.api-tree-children.drop-target {
-  background: var(--accent-dim);
-  box-shadow: inset 0 0 0 1px dashed var(--accent);
-}
-
-.api-tree {
-  min-height: 24px;
-  border-radius: 4px;
-  transition: background 120ms ease, box-shadow 120ms ease;
-}
-
-.api-tree.drop-target {
-  background: var(--accent-dim);
-  box-shadow: inset 0 0 0 1px dashed var(--accent);
-}
-
-.api-tree-row.drop-target {
-  background: var(--accent-dim);
-  box-shadow: inset 0 0 0 1px dashed var(--accent);
-}
-
-.api-tree-children-empty {
-  min-height: 28px;
-  margin: 2px 0 2px 18px;
-  padding: 4px 6px;
-  border-radius: 4px;
-  background: transparent;
-  border: 1px dashed transparent;
-  transition: background 120ms ease, border-color 120ms ease;
-}
-
-.api-tree-children-empty.drop-target {
-  background: var(--accent-dim);
-  border-color: var(--accent);
-}
-
-.api-tree-empty-hint {
-  color: var(--text-muted);
-  font-size: 11px;
-  font-style: italic;
-  text-align: center;
-  padding: 2px 0;
-  user-select: none;
-  pointer-events: none;
+/* Drop feedback must beat `.api-tree-row:hover` (same specificity, defined
+   earlier) *and* stay visible in the light theme, where --accent-dim is only
+   8% alpha — far too faint to read as a drop target on its own. rgba literal
+   rather than color-mix, so older WebView builds still render it (same
+   rationale as .preview-toolong-hint in App.css). The blue matches --accent
+   in both themes closely enough at this alpha. */
+.api-tree-row.drop-target,
+.api-tree-row.drop-target:hover {
+  background: rgba(122, 162, 247, 0.22);
+  box-shadow: inset 0 0 0 2px var(--accent);
+  color: var(--accent);
 }

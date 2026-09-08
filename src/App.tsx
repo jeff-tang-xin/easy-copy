@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo, memo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { enable, isEnabled, disable } from "@tauri-apps/plugin-autostart";
@@ -7,11 +7,14 @@ import { useToast } from "./hooks/useToast";
 import { friendlyError } from "./hooks/friendlyError";
 import { useClipboard, type AppConfig, type ClipboardItem } from "./hooks/useClipboard";
 import { useWindowLifecycle } from "./hooks/useWindowLifecycle";
+import { LazyImage } from "./components/LazyImage";
+import { SettingsDialog } from "./components/SettingsDialog";
 import {
   IconSearch, IconTrash, IconText, IconFiles,
   IconPower, IconWarning, IconZoomIn, IconZoomOut, IconZoomReset,
   IconSun, IconMoon, IconAuto, IconUndo, IconIncognito,
-  IconSettings, IconExport, IconImport, IconCopy, TypeIcon,
+  IconSettings, IconCopy, TypeIcon,
+  IconGlobe, IconNote, IconWrench, IconCamera,
 } from "./components/Icons";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -137,7 +140,312 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+// react-syntax-highlighter 的 style 对象没有导出具名类型，这里用它实际的形状。
+type CodeStyle = { [key: string]: React.CSSProperties };
 
+interface PreviewModalProps {
+  item: ClipboardItem;
+  lang: PreviewLang;
+  onLangChange: (lang: PreviewLang) => void;
+  onClose: () => void;
+  onCopy: (id: string) => void;
+  /** 由 App 计算并 memo 化的 Prism 主题；子组件不再自己算，避免重复推导。 */
+  codeStyle: CodeStyle;
+}
+
+/**
+ * PreviewModal —— 单视图预览弹窗。
+ *
+ * 为什么要独立成组件：原先它是 `{previewItem && (() => {...})()}` 的条件 IIFE，
+ * 里面的 formatContent（JSON.parse + sql-formatter）在每次 App 重渲染时都会同步
+ * 重跑一遍。想加 useMemo 又不行——IIFE 处在条件分支里，条件为假时 Hook 不会被
+ * 调用，会破坏 Hook 调用顺序（tsc 检查不出来，运行时直接白屏）。
+ * 抽成真正的组件后，Hook 位于组件顶层，条件渲染只决定组件是否挂载，合法。
+ */
+function PreviewModal({ item, lang, onLangChange, onClose, onCopy, codeStyle }: PreviewModalProps) {
+  // 廉价的提前退出：内容超长时无论用户选了什么语言都强制走纯文本。
+  // 注意这里用的是**字符数**而不是字节数：中文按 UTF-8 是 3 字节，
+  // 若按字节判断，中文内容会被当成 3 倍大，用户远未卡顿就被剥夺高亮。
+  const tooLong = item.content.length > HIGHLIGHT_MAX_CHARS;
+  const effectiveLang: PreviewLang = tooLong ? 'text' : lang;
+  // deps 用 item.content 而非 item：refresh() 会整体换掉 items 数组，
+  // item 引用变了但内容没变，用 item 会白白重算一次格式化。
+  // deps 用 effectiveLang 而非 lang：超长时 effectiveLang 恒为 'text'，
+  // 用 lang 会让用户切下拉时反复重算出同一个结果。
+  const rendered = useMemo(
+    () =>
+      effectiveLang === 'json' || effectiveLang === 'sql'
+        ? formatContent(item.content, effectiveLang)
+        : item.content,
+    [item.content, effectiveLang]
+  );
+
+  return (
+    <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="preview-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="preview-header">
+          <div className="preview-lang-picker">
+            <label htmlFor="preview-lang-select">预览为</label>
+            <select
+              id="preview-lang-select"
+              className="preview-lang-select"
+              value={lang}
+              onChange={(e) => onLangChange(e.target.value as PreviewLang)}
+              disabled={tooLong}
+              title={tooLong ? '内容过大，已禁用高亮' : undefined}
+            >
+              {PREVIEW_LANGUAGES.map((l) => (
+                <option key={l} value={l}>{l}</option>
+              ))}
+            </select>
+            {/* 超过 HIGHLIGHT_MAX_CHARS 时下拉被禁用，光靠 title 提示鼠标
+                悬停才可见。这里给一条常驻文案，说明为什么没有高亮。 */}
+            {tooLong && (
+              <span className="preview-lang-note">
+                内容过大，已跳过格式化与高亮
+              </span>
+            )}
+          </div>
+          <div className="preview-actions">
+            <button className="preview-btn" onClick={() => onCopy(item.id)} title="复制"><IconCopy /></button>
+            <button className="preview-btn preview-close" onClick={onClose} title="关闭">×</button>
+          </div>
+        </div>
+        <div className="preview-body">
+          {effectiveLang === 'text' ? (
+            <pre className="preview-raw">{item.content}</pre>
+          ) : effectiveLang === 'markdown' ? (
+            <div className="preview-markdown">
+              <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={(url) => url}>{item.content}</ReactMarkdown>
+            </div>
+          ) : (
+            <div className="preview-code">
+              <SyntaxHighlighter
+                language={effectiveLang}
+                style={codeStyle}
+                customStyle={CODE_CUSTOM_STYLE}
+              >
+                {rendered}
+              </SyntaxHighlighter>
+            </div>
+          )}
+        </div>
+        <div className="preview-footer">
+          <span>{item.content.length} 字 · {formatTime(item.timestamp)} · {lang}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// --- 搜索关键词高亮 ---
+// 移到模块作用域：它是纯函数，留在 App 里会每次渲染重建一个新闭包，
+// 一旦作为 prop 传给被 memo 的 ItemCard 就会让 memo 全面失效。
+function highlightText(text: string, query: string): React.ReactNode {
+  if (!query.trim()) return text;
+  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const parts = text.split(new RegExp(`(${escaped})`, "gi"));
+  return parts.map((part, i) =>
+    part.toLowerCase() === query.toLowerCase()
+      ? <mark key={i} className="search-highlight">{part}</mark>
+      : part
+  );
+}
+
+// 文件路径拆成「目录 + 分隔符 + 文件名」，文件名单独加粗。
+// 修复：原实现用 `Math.max(-1, -1)`，对不含分隔符的字符串（如 "file.txt"）
+// 会走进错误分支；现在只显式特判「无分隔符」这一种情况。
+function renderFilePath(f: string): React.ReactNode {
+  const sepBack = f.lastIndexOf("\\");
+  const sepFwd = f.lastIndexOf("/");
+  const idx = sepBack > sepFwd ? sepBack : sepFwd;
+  if (idx >= 0 && idx < f.length - 1) {
+    const dir = f.substring(0, idx);
+    const name = f.substring(idx + 1);
+    // 分隔符是**最后一个**被找到的那个，而 `dir` 切到 `idx`（不含），
+    // 所以分隔符字符本身位于原串 `f` 的 `idx` 处。
+    return <>{dir}{f[idx]}<span className="file-basename">{name}</span></>;
+  }
+  return <span className="file-basename">{f}</span>;
+}
+
+interface ItemCardProps {
+  item: ClipboardItem;
+  index: number;
+  /** 只传「本行是否选中」而不是 selectedIndex——否则选中项一变，整列表全部重渲染。 */
+  isSelected: boolean;
+  /** 同理只传「本行是否刚复制」而不是 copiedId。 */
+  isCopied: boolean;
+  /**
+   * 只传本行那一张图的 url，**绝不传整个 imageCache 对象**：
+   * useClipboard 的 loadImage 每加载完一张图都会 setImageCache(prev => ({...prev}))
+   * 产生全新对象，传整体会让任意一张图加载完成就触发全列表 N 次重渲染，
+   * 比不加 memo 还差。
+   */
+  imageUrl?: string;
+  /**
+   * 搜索词**必须**作为 prop 传入。原实现从 searchRef.current 读，
+   * 而 ref 变化不触发重渲染——过去能工作纯粹因为 App 每次 setState 都整体重渲染。
+   * 一旦本组件被 memo 包住，从 ref 读就会让高亮永久停在旧关键词。
+   */
+  search: string;
+  copyOnDoubleClick: boolean;
+  onCopy: (id: string) => void;
+  onSelect: (index: number) => void;
+  onContextMenu: (e: React.MouseEvent, itemId: string) => void;
+  onPreview: (item: ClipboardItem) => void;
+  onDelete: (id: string, e: React.MouseEvent) => void;
+  onOpenFile: (filePath: string, e: React.MouseEvent) => void;
+  onEnlargeImage: (url: string) => void;
+  onOpenUrl: (url: string) => void;
+}
+
+/**
+ * ItemCard —— 单条剪贴板记录卡片。
+ *
+ * 用 memo 包住是为了让「复制某一条」「选中某一条」「某张图加载完成」
+ * 这类局部变化只重渲染受影响的行，而不是整个列表。前提是所有 props
+ * 都保持稳定引用，见 ItemCardProps 上的各条说明。
+ */
+const ItemCard = memo(function ItemCard({
+  item,
+  index,
+  isSelected,
+  isCopied,
+  imageUrl,
+  search,
+  copyOnDoubleClick,
+  onCopy,
+  onSelect,
+  onContextMenu,
+  onPreview,
+  onDelete,
+  onOpenFile,
+  onEnlargeImage,
+  onOpenUrl,
+}: ItemCardProps) {
+  const renderContent = () => {
+    if (item.type === "Image") {
+      return (
+        <div className="item-image">
+          {imageUrl ? (
+            // LazyImage 基于 IntersectionObserver：视口外的图片根本不会进入
+            // <img>，200+ 条图片记录时能省掉大量无谓的 base64 解码与解压。
+            // 它会把未识别的 props（这里是 onDoubleClick）透传到内部 <img>。
+            <LazyImage
+              src={imageUrl}
+              alt="clipboard image"
+              onDoubleClick={() => onEnlargeImage(imageUrl)}
+            />
+          ) : (
+            <span className="img-placeholder">加载中…</span>
+          )}
+          <span className="item-desc">{item.content}</span>
+        </div>
+      );
+    }
+
+    if (item.type === "Files") {
+      const fileList = item.content.split("\n").filter((f) => f.trim().length > 0);
+      return (
+        <div className="item-files">
+          <span className="file-icon"><IconFiles /></span>
+          {fileList.slice(0, 5).map((f, i) => {
+            const exec = isExecutableFile(f);
+            return (
+              <div
+                key={i}
+                className={`file-name clickable-path ${exec ? "is-exec" : ""}`}
+                title={exec ? `⚠ 可执行文件 — Ctrl+点击打开：${f}` : `Ctrl+点击打开：${f}`}
+                onClick={(e) => { if (!e.ctrlKey) return; onOpenFile(f, e); }}
+              >
+                {exec && <span className="exec-indicator">⚠</span>}
+                {renderFilePath(f)}
+              </div>
+            );
+          })}
+          {fileList.length > 5 && (
+            <div className="file-more">还有 {fileList.length - 5} 个</div>
+          )}
+        </div>
+      );
+    }
+
+    const text = item.content.length > 200
+      ? item.content.substring(0, 200) + "..."
+      : item.content;
+    // Detect URLs and render as clickable links with highlight
+    const urlRegex = /(https?:\/\/[^\s]+)/g;
+    const parts = text.split(urlRegex);
+    return (
+      <>
+        {parts.map((part, i) =>
+          /^https?:\/\//.test(part) ? (
+            <span
+              key={i}
+              className="url-link"
+              onClick={(e) => {
+                e.stopPropagation();
+                if (e.ctrlKey) {
+                  onOpenUrl(part.trim());
+                } else {
+                  onCopy(item.id);
+                }
+              }}
+              onContextMenu={(e) => {
+                // Ctrl+RightClick opens the URL in the default browser.
+                if (e.ctrlKey) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onOpenUrl(part.trim());
+                }
+              }}
+              title={`点击复制 · Ctrl+点击 / Ctrl+右键打开：${part}`}
+            >
+              {part}
+            </span>
+          ) : (
+            <span key={i}>{highlightText(part, search)}</span>
+          )
+        )}
+      </>
+    );
+  };
+
+  return (
+    <div
+      className={`item-card ${(item.type || 'text').toLowerCase()} ${isSelected ? "selected" : ""}`}
+      onClick={() => { onSelect(index); onCopy(item.id); }}
+      onContextMenu={(e) => onContextMenu(e, item.id)}
+      onDoubleClick={(e) => {
+        e.stopPropagation();
+        // Double-click copies by default (configurable).
+        if (copyOnDoubleClick) {
+          onCopy(item.id);
+        } else if (item.type === "Text") {
+          onPreview(item);
+        }
+      }}
+    >
+      <div className="item-content">{renderContent()}</div>
+      <div className="item-meta">
+        <span className="item-type-badge"><TypeIcon type={item.type} /></span>
+        {item.saved_as_note && <span className="item-saved-note" title="已存为笔记"><IconNote /></span>}
+        <span className="item-time">{formatTime(item.timestamp)}</span>
+        <button
+          className="delete-btn"
+          onClick={(e) => onDelete(item.id, e)}
+          title="删除"
+        >
+          <IconTrash />
+        </button>
+      </div>
+      {isCopied && (
+        <div className="copied-badge">已复制</div>
+      )}
+    </div>
+  );
+});
 
 function App() {
   // Toast: shared hook
@@ -164,15 +472,17 @@ function App() {
     handleImport,
   } = useClipboard({ showToast });
 
-  // useClipboard returns `setSearch` which is already debounced — alias it
-  // so JSX onChange handlers read more naturally.
+  // `setSearch` 来自 useClipboard，内部已内建防抖：调用时立即更新受控输入值，
+  // 真正的查询延迟 150ms 触发，并用世代号（searchGenRef）丢弃过期响应，
+  // 避免旧请求的结果覆盖新输入。因此这里**不要**再套一层防抖，
+  // 仅做别名让 JSX 的 onChange 读起来更自然。
   const handleSearch = setSearch;
 
   // Image viewer state
   const [enlargedImage, setEnlargedImage] = useState<string | null>(null);
 
   // Text preview modal
-  const [previewItem, setPreviewItem] = useState<any>(null);
+  const [previewItem, setPreviewItem] = useState<ClipboardItem | null>(null);
   const [previewLang, setPreviewLang] = useState<PreviewLang>('text');
   const [autoStartEnabled, setAutoStartEnabled] = useState(false);
 
@@ -187,7 +497,6 @@ function App() {
 
   // Settings panel
   const [showSettings, setShowSettings] = useState(false);
-  const configRef = useRef<AppConfig | null>(null);
   const [config, setConfig] = useState<AppConfig>({
     max_items: 500,
     poll_interval_ms: 500,
@@ -200,11 +509,8 @@ function App() {
     storage_root: null,
   });
 
-  // Search input ref — for auto-focus on mouse enter & highlightText lookups.
-  // `searchRef` holds the current raw input value so `highlightText` can read
-  // the latest query without needing to be recreated on every keystroke.
+  // Search input ref — for auto-focus on mouse enter.
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const searchRef = useRef("");
 
   // Context menu
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; itemId: string } | null>(null);
@@ -257,6 +563,9 @@ function App() {
     }
   }, [showToast]);
 
+  // 稳定引用，供 PreviewModal 的 onClose 使用，避免每次渲染换新函数。
+  const closePreview = useCallback(() => setPreviewItem(null), []);
+
   // Theme: auto (follow system), light, or dark
   const { themeMode, setThemeMode, theme } = useTheme();
   // Memoised so switching preview language doesn't rebuild the style object.
@@ -273,7 +582,7 @@ function App() {
 
   // Load config once on mount so footer/hints reflect actual shortcuts
   useEffect(() => {
-    invoke<AppConfig>("get_config").then((c) => { setConfig(c); configRef.current = c; }).catch(() => {});
+    invoke<AppConfig>("get_config").then((c) => { setConfig(c); }).catch(() => {});
   }, []);
 
   const handleToggleAutoStart = async () => {
@@ -368,12 +677,6 @@ function App() {
   // (Keeping both installed leads to a window where both handlers fire and
   // close the modal twice.)
 
-  // Keep searchRef in sync with the current search value so highlightText
-  // can read it without triggering re-renders of the renderContent closure.
-  useEffect(() => {
-    searchRef.current = search;
-  }, [search]);
-
   // Reset selection when list changes
   useEffect(() => {
     setSelectedIndex(-1);
@@ -383,7 +686,12 @@ function App() {
   useEffect(() => {
     if (selectedIndex < 0) return;
     const el = document.querySelector(`.item-card.selected`);
-    el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    // 卡片启用了 content-visibility: auto，未渲染区域的高度只是
+    // contain-intrinsic-size 的占位值，与真实高度不符。此时
+    // block:'nearest' + smooth 会按错误的高度计算滚动量，导致键盘导航
+    // 滚动脱轨（跳过目标或反复回弹）。改用 block:'center' 并使用默认的
+    // instant 行为：一次定位到位，浏览器随后按实测高度修正即可。
+    el?.scrollIntoView({ block: "center" });
   }, [selectedIndex]);
 
   // Auto-focus window & search input when mouse enters from another app
@@ -403,7 +711,7 @@ function App() {
     return () => document.removeEventListener('mouseenter', handleMouseEnter);
   }, []);
 
-  const doOpenFile = async (filePath: string) => {
+  const doOpenFile = useCallback(async (filePath: string) => {
     const trimmed = filePath.trim();
     try {
       await invoke("open_file", { path: trimmed });
@@ -411,9 +719,9 @@ function App() {
     } catch (err) {
       showToast(friendlyError(err, "打开失败"), "error");
     }
-  };
+  }, [showToast]);
 
-  const handleOpenFile = (filePath: string, e: React.MouseEvent) => {
+  const handleOpenFile = useCallback((filePath: string, e: React.MouseEvent) => {
     e.stopPropagation();
     e.preventDefault();
     if (isExecutableFile(filePath)) {
@@ -421,7 +729,7 @@ function App() {
       return;
     }
     void doOpenFile(filePath);
-  };
+  }, [doOpenFile]);
 
   const handleExecConfirm = () => {
     if (!execConfirm) return;
@@ -436,150 +744,56 @@ function App() {
   // lived inline in App.tsx; ApiApp had a thinner version that just
   // truncated the raw string.
 
-  // --- Settings ---
-  const loadConfig = async () => {
-    try {
-      const cfg = await invoke<AppConfig>("get_config");
-      setConfig(cfg);
-      configRef.current = cfg;
-    } catch (err) {
-      showToast(friendlyError(err, "加载配置失败"), "error");
-    }
-  };
-
-  const handleSaveConfig = async () => {
-    try {
-      await invoke("set_config", { config });
-      configRef.current = config;
-      showToast("设置已保存");
-      setShowSettings(false);
-    } catch (err) {
-      showToast(friendlyError(err, "保存失败"), "error");
-    }
-  };
-
   // --- Context menu ---
-  const handleContextMenu = (e: React.MouseEvent, itemId: string) => {
+  const handleContextMenu = useCallback((e: React.MouseEvent, itemId: string) => {
     e.preventDefault();
     e.stopPropagation();
     setContextMenu({ x: e.clientX, y: e.clientY, itemId });
-  };
+  }, []);
 
   const closeContextMenu = () => setContextMenu(null);
 
-  // --- Search highlight helper ---
-  const highlightText = (text: string, query: string): React.ReactNode => {
-    if (!query.trim()) return text;
-    const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const parts = text.split(new RegExp(`(${escaped})`, "gi"));
-    return parts.map((part, i) =>
-      part.toLowerCase() === query.toLowerCase()
-        ? <mark key={i} className="search-highlight">{part}</mark>
-        : part
-    );
-  };
+  // --- 传给被 memo 的 ItemCard 的回调，全部用 useCallback 稳定引用 ---
+  // 任何一个回调每次渲染换新引用，都会让整列表的 memo 彻底失效。
 
-  const renderContent = (item: ClipboardItem) => {
-    if (item.type === "Image") {
-      return (
-        <div className="item-image">
-          {imageCache[item.id] ? (
-            <img src={imageCache[item.id]} alt="clipboard image" onDoubleClick={() => openEnlargedImage(imageCache[item.id])} />
-          ) : (
-            <span className="img-placeholder">加载中…</span>
-          )}
-          <span className="item-desc">{item.content}</span>
-        </div>
-      );
-    }
+  const handleSelect = useCallback((index: number) => setSelectedIndex(index), []);
 
-    if (item.type === "Files") {
-      const fileList = item.content.split("\n").filter((f) => f.trim().length > 0);
-      const renderPath = (f: string) => {
-        // Fix: original `Math.max(-1, -1)` would not render a separator for
-        // strings without path separators (e.g. "file.txt" → idx = -1).
-        // Now we only special-case the "no separator" path explicitly.
-        const sepBack = f.lastIndexOf("\\");
-        const sepFwd = f.lastIndexOf("/");
-        const idx = sepBack > sepFwd ? sepBack : sepFwd;
-        if (idx >= 0 && idx < f.length - 1) {
-          const dir = f.substring(0, idx);
-          const name = f.substring(idx + 1);
-          // The separator is the *last* one found, but `dir` was sliced up to
-          // `idx` (exclusive), so the separator char lives at index `idx` in
-          // the original string `f`.
-          return <>{dir}{f[idx]}<span className="file-basename">{name}</span></>;
-        }
-        return <span className="file-basename">{f}</span>;
-      };
-      return (
-        <div className="item-files">
-          <span className="file-icon"><IconFiles /></span>
-          {fileList.slice(0, 5).map((f, i) => {
-            const exec = isExecutableFile(f);
-            return (
-              <div
-                key={i}
-                className={`file-name clickable-path ${exec ? "is-exec" : ""}`}
-                title={exec ? `⚠ 可执行文件 — Ctrl+点击打开：${f}` : `Ctrl+点击打开：${f}`}
-                onClick={(e) => { if (!e.ctrlKey) return; handleOpenFile(f, e); }}
-              >
-                {exec && <span className="exec-indicator">⚠</span>}
-                {renderPath(f)}
-              </div>
-            );
-          })}
-          {fileList.length > 5 && (
-            <div className="file-more">还有 {fileList.length - 5} 个</div>
-          )}
-        </div>
-      );
-    }
+  const handlePreview = useCallback((item: ClipboardItem) => {
+    setPreviewItem(item);
+    setPreviewLang('text');
+  }, []);
 
-    const text = item.content.length > 200
-      ? item.content.substring(0, 200) + "..."
-      : item.content;
-    // Detect URLs and render as clickable links with highlight
-    const urlRegex = /(https?:\/\/[^\s]+)/g;
-    const parts = text.split(urlRegex);
-    return (
-      <>
-        {parts.map((part, i) =>
-          /^https?:\/\//.test(part) ? (
-            <span
-              key={i}
-              className="url-link"
-              onClick={(e) => {
-                e.stopPropagation();
-                if (e.ctrlKey) {
-                  invoke("open_url", { url: part.trim() }).catch((err) =>
-                    showToast(friendlyError(err, "打开失败"), "error")
-                  );
-                } else {
-                  handleCopy(item.id);
-                }
-              }}
-              onContextMenu={(e) => {
-                // Ctrl+RightClick opens the URL in the default browser.
-                if (e.ctrlKey) {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  invoke("open_url", { url: part.trim() })
-                    .then(() => showToast(`已打开：${part.trim()}`, "success"))
-                    .catch((err) => showToast(friendlyError(err, "打开失败"), "error"));
-                }
-              }}
-              title={`点击复制 · Ctrl+点击 / Ctrl+右键打开：${part}`}
-            >
-              {part}
-            </span>
-          ) : (
-            <span key={i}>{highlightText(part, searchRef.current)}</span>
-          )
-        )}
-      </>
-    );
-  };
+  const handleOpenUrl = useCallback((url: string) => {
+    invoke("open_url", { url })
+      .then(() => showToast(`已打开：${url}`, "success"))
+      .catch((err) => showToast(friendlyError(err, "打开失败"), "error"));
+  }, [showToast]);
+
+  // handleDelete 来自 useClipboard，其 deps 含 [items]，items 一变引用就变
+  // → 刷新一次列表就会让全列表 memo 失效。这里用 ref 包一层拿到永久稳定的
+  // 引用。这是权宜之计：根治需要把 useClipboard 里的 handleDelete 改成
+  // 用 itemsRef 读取，从而摆脱 [items] 依赖，但那个文件当前不在本次改动范围内。
+  const delRef = useRef(handleDelete);
+  delRef.current = handleDelete;
+  const onDelete = useCallback(
+    (id: string, e: React.MouseEvent) => { void delRef.current(id, e); },
+    []
+  );
+
+  const renderedGroups = useMemo(() => {
+    // Group items by date
+    const groups: { label: string; items: { item: ClipboardItem; index: number }[] }[] = [];
+    let currentGroup = "";
+    items.forEach((item, index) => {
+      const group = getDateGroup(item.timestamp);
+      if (group !== currentGroup) {
+        currentGroup = group;
+        groups.push({ label: group, items: [] });
+      }
+      groups[groups.length - 1].items.push({ item, index });
+    });
+    return groups;
+  }, [items]);
 
   return (
     <div className="app">
@@ -608,7 +822,7 @@ function App() {
         >
           <IconIncognito />
         </button>
-        <button className="toolbar-btn" onClick={() => { loadConfig(); setShowSettings(true); }} title="设置">
+        <button className="toolbar-btn" onClick={() => setShowSettings(true)} title="设置">
           <IconSettings />
         </button>
       </div>
@@ -621,59 +835,31 @@ function App() {
           </div>
         ) : (
           <div className="item-list">
-            {(() => {
-              // Group items by date
-              const groups: { label: string; items: { item: ClipboardItem; index: number }[] }[] = [];
-              let currentGroup = "";
-              items.forEach((item, index) => {
-                const group = getDateGroup(item.timestamp);
-                if (group !== currentGroup) {
-                  currentGroup = group;
-                  groups.push({ label: group, items: [] });
-                }
-                groups[groups.length - 1].items.push({ item, index });
-              });
-              return groups.map((group) => (
-                <div key={group.label} className="date-group">
-                  <div className="group-header">{group.label}</div>
-                  {group.items.map(({ item, index }) => (
-              <div
-                key={item.id}
-                className={`item-card ${(item.type || 'text').toLowerCase()} ${index === selectedIndex ? "selected" : ""}`}
-                onClick={() => { setSelectedIndex(index); handleCopy(item.id); }}
-                onContextMenu={(e) => handleContextMenu(e, item.id)}
-                onDoubleClick={(e) => {
-                  e.stopPropagation();
-                  // Double-click copies by default (configurable).
-                  if (configRef.current?.copy_on_double_click !== false) {
-                    handleCopy(item.id);
-                  } else if (item.type === "Text") {
-                    setPreviewItem(item);
-                    setPreviewLang('text');
-                  }
-                }}
-              >
-                <div className="item-content">{renderContent(item)}</div>
-                <div className="item-meta">
-                  <span className="item-type-badge"><TypeIcon type={item.type} /></span>
-                  {item.saved_as_note && <span className="item-saved-note" title="已存为笔记">📝</span>}
-                  <span className="item-time">{formatTime(item.timestamp)}</span>
-                  <button
-                    className="delete-btn"
-                    onClick={(e) => handleDelete(item.id, e)}
-                    title="删除"
-                  >
-                    <IconTrash />
-                  </button>
-                </div>
-                {copiedId === item.id && (
-                  <div className="copied-badge">已复制</div>
-                )}
+            {renderedGroups.map((group) => (
+              <div key={group.label} className="date-group">
+                <div className="group-header">{group.label}</div>
+                {group.items.map(({ item, index }) => (
+                  <ItemCard
+                    key={item.id}
+                    item={item}
+                    index={index}
+                    isSelected={index === selectedIndex}
+                    isCopied={copiedId === item.id}
+                    imageUrl={imageCache[item.id]}
+                    search={search}
+                    copyOnDoubleClick={config.copy_on_double_click !== false}
+                    onCopy={handleCopy}
+                    onSelect={handleSelect}
+                    onContextMenu={handleContextMenu}
+                    onPreview={handlePreview}
+                    onDelete={onDelete}
+                    onOpenFile={handleOpenFile}
+                    onEnlargeImage={openEnlargedImage}
+                    onOpenUrl={handleOpenUrl}
+                  />
+                ))}
               </div>
-                  ))}
-                </div>
-              ));
-            })()}
+            ))}
           </div>
         )}
       </div>
@@ -702,7 +888,7 @@ function App() {
             }}
             title={`打开 API 窗口（${config.api_shortcut}）`}
           >
-            <span>🌐 API</span>
+            <span><IconGlobe /> API</span>
           </button>
           <button
             className="notes-btn"
@@ -711,7 +897,7 @@ function App() {
             }}
             title={`打开笔记（${config.notes_shortcut}）`}
           >
-            <span>📝 笔记</span>
+            <span><IconNote /> 笔记</span>
           </button>
           <button
             className="notes-btn"
@@ -720,7 +906,7 @@ function App() {
             }}
             title="打开开发者工具"
           >
-            <span>🔧 工具</span>
+            <span><IconWrench /> 工具</span>
           </button>
           <button
             className="notes-btn"
@@ -729,7 +915,7 @@ function App() {
             }}
             title={`截图（${config.screenshot_shortcut}）`}
           >
-            <span>📸 截图</span>
+            <span><IconCamera /> 截图</span>
           </button>
         </div>
         <div className="footer-info-group">
@@ -784,69 +970,19 @@ function App() {
         </div>
       )}
 
-      {previewItem && (() => {
-        // Single-view preview. User picks language from a dropdown:
-        //   text     -> plain <pre>
-        //   markdown -> ReactMarkdown
-        //   others   -> Prism syntax highlight (json / sql are auto-formatted)
-        const lang = previewLang;
-        const raw = previewItem.content;
-        // Cheap early bail: super long content → force plain text regardless of picker.
-        const tooLong = raw.length > HIGHLIGHT_MAX_CHARS;
-        const effectiveLang: PreviewLang = tooLong ? 'text' : lang;
-        const rendered = (effectiveLang === 'json' || effectiveLang === 'sql')
-          ? formatContent(raw, effectiveLang)
-          : raw;
-        return (
-        <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setPreviewItem(null); }}>
-          <div className="preview-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="preview-header">
-              <div className="preview-lang-picker">
-                <label htmlFor="preview-lang-select">预览为</label>
-                <select
-                  id="preview-lang-select"
-                  className="preview-lang-select"
-                  value={lang}
-                  onChange={(e) => setPreviewLang(e.target.value as PreviewLang)}
-                  disabled={tooLong}
-                  title={tooLong ? '内容过大，已禁用高亮' : undefined}
-                >
-                  {PREVIEW_LANGUAGES.map((l) => (
-                    <option key={l} value={l}>{l}</option>
-                  ))}
-                </select>
-              </div>
-              <div className="preview-actions">
-                <button className="preview-btn" onClick={() => handleCopy(previewItem.id)} title="复制"><IconCopy /></button>
-                <button className="preview-btn preview-close" onClick={() => setPreviewItem(null)} title="关闭">×</button>
-              </div>
-            </div>
-            <div className="preview-body">
-              {effectiveLang === 'text' ? (
-                <pre className="preview-raw">{raw}</pre>
-              ) : effectiveLang === 'markdown' ? (
-                <div className="preview-markdown">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={(url) => url}>{raw}</ReactMarkdown>
-                </div>
-              ) : (
-                <div className="preview-code">
-                  <SyntaxHighlighter
-                    language={effectiveLang}
-                    style={codeStyle}
-                    customStyle={CODE_CUSTOM_STYLE}
-                  >
-                    {rendered}
-                  </SyntaxHighlighter>
-                </div>
-              )}
-            </div>
-            <div className="preview-footer">
-              <span>{previewItem.content.length} 字 · {formatTime(previewItem.timestamp)} · {lang}</span>
-            </div>
-          </div>
-        </div>
-        );
-      })()}
+      {/* Single-view preview. User picks language from a dropdown:
+          text -> plain <pre> / markdown -> ReactMarkdown /
+          others -> Prism syntax highlight (json、sql 会自动格式化)。 */}
+      {previewItem && (
+        <PreviewModal
+          item={previewItem}
+          lang={previewLang}
+          onLangChange={setPreviewLang}
+          onClose={closePreview}
+          onCopy={handleCopy}
+          codeStyle={codeStyle}
+        />
+      )}
 
       {execConfirm && (
         <div className="modal-overlay" onClick={handleExecCancel}>
@@ -943,148 +1079,17 @@ function App() {
         </>
       )}
 
-      {showSettings && (
-        <div className="modal-overlay" onClick={() => setShowSettings(false)}>
-          <div className="settings-dialog" onClick={(e) => e.stopPropagation()}>
-            <h3 className="settings-title">设置</h3>
-
-            <div className="settings-row">
-              <label className="settings-label">最大历史条数</label>
-              <input
-                className="settings-input"
-                type="number"
-                min="50"
-                max="5000"
-                value={config.max_items}
-                onChange={(e) => setConfig({ ...config, max_items: Math.max(50, parseInt(e.target.value) || 500) })}
-              />
-            </div>
-
-            <div className="settings-row">
-              <label className="settings-label">轮询间隔 (毫秒)</label>
-              <input
-                className="settings-input"
-                type="number"
-                min="200"
-                max="5000"
-                value={config.poll_interval_ms}
-                onChange={(e) => setConfig({ ...config, poll_interval_ms: Math.max(200, parseInt(e.target.value) || 500) })}
-              />
-            </div>
-
-            <div className="settings-row settings-row-toggle">
-              <label className="settings-label" htmlFor="copy-on-dbl">双击复制</label>
-              <input
-                id="copy-on-dbl"
-                className="settings-checkbox"
-                type="checkbox"
-                checked={config.copy_on_double_click}
-                onChange={(e) => setConfig({ ...config, copy_on_double_click: e.target.checked })}
-              />
-              <span className="settings-hint">关闭后，双击文本条目会打开预览窗口而非直接复制</span>
-            </div>
-
-            <div className="settings-row">
-              <label className="settings-label">剪贴板快捷键</label>
-              <input
-                className="settings-input"
-                type="text"
-                placeholder="Ctrl+Shift+V"
-                value={config.clipboard_shortcut}
-                onChange={(e) => setConfig({ ...config, clipboard_shortcut: e.target.value })}
-              />
-            </div>
-
-            <div className="settings-row">
-              <label className="settings-label">笔记快捷键</label>
-              <input
-                className="settings-input"
-                type="text"
-                placeholder="Ctrl+Shift+N"
-                value={config.notes_shortcut}
-                onChange={(e) => setConfig({ ...config, notes_shortcut: e.target.value })}
-              />
-            </div>
-
-            <div className="settings-row">
-              <label className="settings-label">工具快捷键</label>
-              <input
-                className="settings-input"
-                type="text"
-                placeholder="Ctrl+Shift+T"
-                value={config.tools_shortcut}
-                onChange={(e) => setConfig({ ...config, tools_shortcut: e.target.value })}
-              />
-            </div>
-
-            <div className="settings-row">
-              <label className="settings-label">截图快捷键</label>
-              <input
-                className="settings-input"
-                type="text"
-                placeholder="Ctrl+Shift+S"
-                value={config.screenshot_shortcut}
-                onChange={(e) => setConfig({ ...config, screenshot_shortcut: e.target.value })}
-              />
-            </div>
-
-            <div className="settings-row">
-              <label className="settings-label">API 快捷键</label>
-              <input
-                className="settings-input"
-                type="text"
-                placeholder="Ctrl+Shift+U"
-                value={config.api_shortcut}
-                onChange={(e) => setConfig({ ...config, api_shortcut: e.target.value })}
-              />
-            </div>
-
-            <div className="settings-row">
-              <label className="settings-label">存储位置</label>
-              <div className="settings-storage-row">
-                <input
-                  className="settings-input"
-                  type="text"
-                  placeholder="默认（系统应用数据目录）"
-                  value={config.storage_root || ""}
-                  onChange={(e) => setConfig({ ...config, storage_root: e.target.value || null })}
-                />
-                <button
-                  className="settings-action-btn"
-                  onClick={async () => {
-                    try {
-                      const sel = await invoke<string>("select_folder");
-                      if (sel) setConfig({ ...config, storage_root: sel });
-                    } catch (e) {
-                      showToast(friendlyError(e, "选择文件夹失败"), "error");
-                    }
-                  }}
-                >
-                  浏览
-                </button>
-              </div>
-              <span className="settings-hint">剪贴板历史、笔记、截图与 API 集合的保存位置。留空使用默认目录。</span>
-            </div>
-
-            <div className="settings-row">
-              <label className="settings-label">数据管理</label>
-              <div className="settings-buttons-row">
-                <button className="settings-action-btn" onClick={handleExport}>
-                  <IconExport /> 导出
-                </button>
-                <button className="settings-action-btn" onClick={handleImport}>
-                  <IconImport /> 导入
-                </button>
-              </div>
-            </div>
-
-            <div className="settings-footer">
-              <button className="exec-btn-cancel" onClick={() => setShowSettings(false)}>取消</button>
-              <button className="exec-btn-open" onClick={handleSaveConfig}>保存</button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* 设置面板整体交给 SettingsDialog：它自持 get_config 加载、草稿态、
+          保存中禁用等逻辑。这里只需把保存结果同步回顶层 config，
+          因为 footer/hints 要显示实际快捷键。 */}
+      <SettingsDialog
+        open={showSettings}
+        onClose={() => setShowSettings(false)}
+        onSaved={(cfg) => setConfig(cfg)}
+        showToast={showToast}
+        onExport={handleExport}
+        onImport={handleImport}
+      />
     </div>
   );
 }

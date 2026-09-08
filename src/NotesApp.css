@@ -43,12 +43,12 @@
   width: 100%;
   padding: 7px 28px 7px 10px;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background-color: var(--bg-tertiary);
   color: var(--text-primary);
   font-size: 13px;
   outline: none;
-  transition: border-color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease;
+  transition: border-color var(--dur) var(--ease), background-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
 .notes-search::placeholder { color: var(--text-muted); }
 .notes-search:focus {
@@ -69,7 +69,7 @@
   font-size: 12px;
   line-height: 1;
   cursor: pointer;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   padding: 0;
   display: flex;
   align-items: center;
@@ -110,12 +110,12 @@
   gap: 8px;
   padding: 6px 10px;
   margin: 1px 0;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   font-size: 13px;
   color: var(--text-secondary);
   border-left: 3px solid transparent;
-  transition: background-color 0.12s ease, color 0.12s ease;
+  transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
 }
 .cat-item:hover {
   background-color: var(--bg-hover);
@@ -158,13 +158,13 @@
 .tag-chip {
   font-size: 11px;
   padding: 3px 10px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background-color: var(--bg-tertiary);
   color: var(--text-secondary);
   border: 1px solid var(--border-color);
   cursor: pointer;
   user-select: none;
-  transition: all 0.12s ease;
+  transition: all var(--dur-fast) var(--ease);
 }
 .tag-chip:hover {
   background-color: var(--accent-dim);
@@ -188,10 +188,20 @@
 .notes-item {
   padding: 9px 12px;
   margin: 2px 0;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   border-left: 3px solid transparent;
-  transition: background-color 0.12s ease;
+  transition: background-color var(--dur-fast) var(--ease);
+  /* 笔记库上千条时，视口内只有十来行可见，其余的排版/绘制全是浪费。
+     contain-intrinsic-size 必须用 `auto <len>` 双值：auto 让浏览器记住上一次
+     真实测得的行高，<len> 只作首次渲染前的占位；只写单值会让滚动条长度在
+     标题行/带预览行之间反复跳动。
+     占位值 = padding 18 + 标题 18 + meta 17 ≈ 53px（带预览的行会更高，由
+     auto 接管）。⚠️ 改本规则的 padding 时必须同批调整此值。
+     content-visibility: auto 隐含 contain: paint —— 本行内全是常规流元素，
+     无溢出型徽标，故安全；今后若加绝对定位的角标需改为内缩定位。 */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 53px;
 }
 .notes-item:hover { background-color: var(--bg-hover); }
 .notes-item.active {
@@ -273,11 +283,11 @@
   padding: 6px 10px;
   font-size: 12px;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background-color: var(--bg-tertiary);
   color: var(--text-primary);
   outline: none;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
   width: 150px;
 }
 .cat-input::placeholder { color: var(--text-muted); }
@@ -294,7 +304,7 @@
   user-select: none;
   min-width: 56px;
   text-align: right;
-  transition: opacity 0.2s ease, color 0.2s ease;
+  transition: opacity var(--dur) var(--ease), color var(--dur) var(--ease);
 }
 .notes-saved-hint.visible { color: var(--green, #9ece6a); }
 
@@ -320,9 +330,9 @@
   border: 1px solid var(--border-color);
   background-color: var(--bg-tertiary);
   color: var(--text-secondary);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   cursor: pointer;
-  transition: all 0.12s ease;
+  transition: all var(--dur-fast) var(--ease);
   white-space: nowrap;
 }
 .notes-btn:hover {
@@ -354,7 +364,7 @@
 .notes-view-segmented {
   display: inline-flex;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   overflow: hidden;
   flex-shrink: 0;
 }
@@ -366,7 +376,7 @@
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
-  transition: all 0.12s ease;
+  transition: all var(--dur-fast) var(--ease);
   white-space: nowrap;
   border-right: 1px solid var(--border-color);
 }
@@ -397,9 +407,9 @@
   border: 1px solid transparent;
   background: transparent;
   color: var(--text-secondary);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   cursor: pointer;
-  transition: all 0.12s ease;
+  transition: all var(--dur-fast) var(--ease);
   white-space: nowrap;
 }
 .notes-format-btn:hover {
@@ -429,7 +439,7 @@
 .notes-tag {
   font-size: 11px;
   padding: 3px 4px 3px 10px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background-color: var(--accent-dim);
   color: var(--accent);
   border: 1px solid transparent;
@@ -448,7 +458,7 @@
   line-height: 1;
   border-radius: 50%;
   opacity: 0.7;
-  transition: all 0.12s ease;
+  transition: all var(--dur-fast) var(--ease);
 }
 .notes-tag-x:hover {
   color: var(--red);
@@ -462,8 +472,8 @@
   outline: none;
   min-width: 100px;
   padding: 4px 10px;
-  border-radius: 999px;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  border-radius: var(--radius-full);
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
 .notes-tag-input::placeholder { color: var(--text-muted); }
 .notes-tag-input:focus {
@@ -532,7 +542,7 @@
 .notes-preview.markdown-body pre {
   background-color: var(--bg-tertiary);
   padding: 12px 14px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   overflow-x: auto;
   border: 1px solid var(--border-color);
   font-family: "JetBrains Mono", "Consolas", "Menlo", ui-monospace, monospace;
@@ -542,7 +552,7 @@
   background-color: var(--bg-tertiary);
   color: var(--accent);
   padding: 1px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   font-size: 0.9em;
   font-family: "JetBrains Mono", "Consolas", "Menlo", ui-monospace, monospace;
 }
@@ -586,7 +596,7 @@
 }
 .notes-preview.markdown-body img {
   max-width: 100%;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   margin: 0.4em 0;
 }
 
@@ -607,11 +617,11 @@
   background-color: var(--bg-secondary);
   color: var(--text-primary);
   padding: 8px 18px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   font-size: 13px;
   border: 1px solid var(--border-color);
   border-left: 3px solid var(--accent);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+  box-shadow: var(--shadow-md);
   z-index: 100;
   animation: notes-toast-in 0.15s ease;
 }
@@ -642,7 +652,7 @@
 .notes-textarea::-webkit-scrollbar-thumb,
 .tag-cloud::-webkit-scrollbar-thumb {
   background: var(--scrollbar-thumb);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 .notes-sidebar ::-webkit-scrollbar-thumb:hover,
 .notes-list::-webkit-scrollbar-thumb:hover,
@@ -651,3 +661,17 @@
 .tag-cloud::-webkit-scrollbar-thumb:hover {
   background: var(--scrollbar-hover);
 }
+
+/* ===== Focus Ring（统一键盘焦点提示） =====
+   与 App.css 同一套规则：只用既有 --ring token，用 :focus-visible 而非
+   :focus 以免鼠标点击也弹环。已有自定义 focus 样式的选择器特异性更高，
+   不会被这里覆盖成双环。 */
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+[tabindex]:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+

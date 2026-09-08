@@ -1,11 +1,19 @@
-import { useState, useMemo, useEffect, useCallback, useRef } from "react";
-import type { Dispatch, SetStateAction } from "react";
+import { useState, useMemo, useEffect, useCallback, useRef, Fragment } from "react";
+import type { Dispatch, ReactNode, SetStateAction } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useTheme } from "./hooks/useTheme";
 import { useToast } from "./hooks/useToast";
 import { friendlyError } from "./hooks/friendlyError";
 import { BodyView } from "./JsonView";
+import {
+  IconClock,
+  IconGlobe,
+  IconPuzzle,
+  IconSearch,
+  IconSettings,
+  IconShuffle,
+} from "./components/Icons";
 import "./App.css";
 import "./ToolsApp.css";
 
@@ -17,7 +25,7 @@ function pad(n: number, w = 2) {
   return String(n).padStart(w, "0");
 }
 
-function TimestampTab() {
+function TimestampTab({ visible }: { visible: boolean }) {
   const [now, setNow] = useState(Date.now());
   const [epochInput, setEpochInput] = useState("");
   const [dateInput, setDateInput] = useState("");
@@ -26,10 +34,19 @@ function TimestampTab() {
   // the same de-dup behaviour.
   const { toast, showToast } = useToast();
 
+  // 每秒刷新「当前时间」。窗口关闭走的是 win.hide()（见文件末尾 onCloseRequested），
+  // 组件不会卸载，所以这里必须按可见性收敛：不可见时干脆不创建 interval，
+  // 而不是在回调里空转 —— 否则窗口隐藏后仍每秒 setNow 触发整个 Tab 重渲染。
+  // tick 直接写在 effect 内部（不作为外部依赖传入），这样依赖只有 visible，
+  // 不会因父级重渲染而每秒重置定时器。
   useEffect(() => {
+    if (!visible) return;
+    // 先补跑一次：隐藏期间 now 已经停在旧值，恢复可见时若等下一次 tick
+    // 会看到最多 1 秒的过期时间。
+    setNow(Date.now());
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
-  }, []);
+  }, [visible]);
 
   const nowDate = new Date(now);
 
@@ -728,6 +745,7 @@ interface PortInfo {
   state: string;
   pid: number;
   process_name: string;
+  memory_kb: number | null;
 }
 
 /** One running process, as returned by the `list_processes` command. */
@@ -756,6 +774,7 @@ interface ProxyConfig {
   port: number;
   running: boolean;
   routes: ProxyRoute[];
+  allow_lan: boolean;
 }
 
 interface ProxyState {
@@ -765,19 +784,43 @@ interface ProxyState {
   routes: ProxyRoute[];
   logs: string[];
   requestLogs: ProxyLog[];
+  allowLan: boolean;
+}
+
+/** 请求日志的状态码筛选档位。"err" = 连接失败（status 0 或带 error）。 */
+type LogStatusFilter = "all" | "2xx" | "3xx" | "4xx" | "5xx" | "err";
+
+const LOG_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
+
+/** 提取启动失败中的端口占用提示。 */
+function startFailureHint(msg: string, port: number): string {
+  const lower = msg.toLowerCase();
+  if (lower.includes("10048") || lower.includes("os error 98") || lower.includes("address in use")) {
+    return `端口 ${port} 已被占用，请换一个端口，或在「进程/端口」面板结束占用该端口的进程`;
+  }
+  return msg;
 }
 
 function ProxyTab({
   state,
   setState,
+  visible,
 }: {
   state: ProxyState;
   setState: Dispatch<SetStateAction<ProxyState>>;
+  visible: boolean;
 }) {
-  const { port, isRunning, defaultTarget, routes, logs, requestLogs } = state;
+  const { port, isRunning, defaultTarget, routes, logs, requestLogs, allowLan } = state;
   const [newPrefix, setNewPrefix] = useState("");
   const [newTarget, setNewTarget] = useState("");
   const [selectedLog, setSelectedLog] = useState<ProxyLog | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editPrefix, setEditPrefix] = useState("");
+  const [editTarget, setEditTarget] = useState("");
+  const [startError, setStartError] = useState<string | null>(null);
+  const [logFilterText, setLogFilterText] = useState("");
+  const [logFilterMethod, setLogFilterMethod] = useState("all");
+  const [logFilterStatus, setLogFilterStatus] = useState<LogStatusFilter>("all");
 
   const pushLog = (msg: string) =>
     setState((s) => ({
@@ -797,6 +840,7 @@ function ProxyTab({
           isRunning: cfg.running,
           defaultTarget: cfg.default_target,
           routes: cfg.routes,
+          allowLan: cfg.allow_lan,
         }));
       } catch {
         // silent
@@ -804,35 +848,84 @@ function ProxyTab({
     })();
   }, []);
 
-  // Poll proxy logs every 2 seconds so new entries appear automatically.
-  // Skipped when the tab is hidden so the app doesn't keep invoking IPC in
-  // the background — once the user comes back the next tick re-syncs.
+  // 每 2 秒轮询代理日志，让新条目自动出现。
+  // 之前是「照常每 2s 唤醒 JS，再在回调里判 document.visibilityState 决定跳过」，
+  // 白白唤醒定时器；现在改为不可见时根本不建 interval，恢复可见立刻补拉一次。
+  // fetchLogs 写在 effect 内部，依赖只有 visible，避免父级重渲染重置轮询周期。
   useEffect(() => {
+    if (!visible) return;
     let cancelled = false;
-    const tick = async () => {
-      if (document.visibilityState === "visible") {
-        try {
-          const logs = await invoke<ProxyLog[]>("get_proxy_logs");
-          if (!cancelled) setState((s) => ({ ...s, requestLogs: logs }));
-        } catch {
-          // silent
-        }
+    const fetchLogs = async () => {
+      try {
+        const logs = await invoke<ProxyLog[]>("get_proxy_logs");
+        if (!cancelled) setState((s) => ({ ...s, requestLogs: logs }));
+      } catch {
+        // silent
       }
     };
-    const interval = setInterval(tick, 2000);
+    // 立刻补跑一次：不可见期间日志已经停更，否则要等满 2 秒才看到。
+    fetchLogs();
+    const interval = setInterval(fetchLogs, 2000);
     return () => {
       cancelled = true;
       clearInterval(interval);
     };
-  }, []);
+  }, [visible, setState]);
 
   const toggleServer = async () => {
     try {
       await invoke(isRunning ? "stop_proxy" : "start_proxy", { port });
       setState((s) => ({ ...s, isRunning: !isRunning }));
+      setStartError(null);
       pushLog(`代理已${isRunning ? "停止" : "启动"}，端口 ${port}`);
     } catch (e) {
-      pushLog(`错误：${friendlyError(e, "操作失败")}`);
+      const msg = friendlyError(e, "操作失败");
+      pushLog(`错误：${msg}`);
+      if (!isRunning) setStartError(startFailureHint(msg, port));
+    }
+  };
+
+  // 后端在代理运行时会拒绝切换：绑定地址在 listener 创建时就定死了，
+  // 中途翻转标志只会让 UI 显示一个服务器并没有在用的绑定。因此这里不做
+  // 「先改后提示重启」，而是运行时直接禁用开关（见下方 disabled）。
+  const toggleAllowLan = async (next: boolean) => {
+    try {
+      await invoke("set_proxy_allow_lan", { allow: next });
+      setState((s) => ({ ...s, allowLan: next }));
+      pushLog(`已${next ? "开启" : "关闭"}局域网访问`);
+    } catch (e) {
+      pushLog(`设置局域网访问失败：${friendlyError(e, "设置失败")}`);
+    }
+  };
+
+  const startEdit = (route: ProxyRoute) => {
+    setEditingId(route.id);
+    setEditPrefix(route.path_prefix);
+    setEditTarget(route.target);
+  };
+
+  const cancelEdit = () => {
+    setEditingId(null);
+    setEditPrefix("");
+    setEditTarget("");
+  };
+
+  // 复用同一个 route.id 调 upsert_proxy_route，后端按 id 覆盖即为「编辑」。
+  const saveEdit = async (route: ProxyRoute) => {
+    const prefix = editPrefix.trim();
+    const target = editTarget.trim();
+    if (!prefix || !target) return;
+    const updated: ProxyRoute = { ...route, path_prefix: prefix, target };
+    try {
+      await invoke("upsert_proxy_route", { route: updated });
+      setState((s) => ({
+        ...s,
+        routes: s.routes.map((r) => (r.id === route.id ? updated : r)),
+      }));
+      cancelEdit();
+      pushLog(`已更新规则：${prefix} → ${target}`);
+    } catch (e) {
+      pushLog(`更新规则失败：${friendlyError(e, "更新失败")}`);
     }
   };
 
@@ -886,6 +979,25 @@ function ProxyTab({
     }
   };
 
+  // 派生视图，不改动 requestLogs 本身，避免筛选把真实日志吃掉。
+  const shownLogs = useMemo(() => {
+    const kw = logFilterText.trim().toLowerCase();
+    return [...requestLogs]
+      .reverse()
+      .filter((log) => {
+        if (kw && !log.url.toLowerCase().includes(kw)) return false;
+        if (logFilterMethod !== "all" && log.method.toUpperCase() !== logFilterMethod) return false;
+        if (logFilterStatus !== "all") {
+          const failed = log.status === 0 || !!log.error;
+          if (logFilterStatus === "err") return failed;
+          if (failed) return false;
+          const bucket = `${Math.floor(log.status / 100)}xx`;
+          if (bucket !== logFilterStatus) return false;
+        }
+        return true;
+      });
+  }, [requestLogs, logFilterText, logFilterMethod, logFilterStatus]);
+
   return (
     <div className="tools-tab-content">
       <div className="tools-section">
@@ -902,6 +1014,21 @@ function ProxyTab({
           <button className={isRunning ? "stop-btn" : "start-btn"} onClick={toggleServer}>{isRunning ? "停止代理" : "启动代理"}</button>
         </div>
         <p style={{ marginTop: "8px", fontSize: "13px", opacity: 0.8 }}>状态：{isRunning ? "运行中" : "已停止"}</p>
+        <label className="tools-hint" style={{ display: "flex", alignItems: "center", gap: "6px", marginTop: "8px", cursor: isRunning ? "not-allowed" : "pointer" }} title={isRunning ? "请先停止代理再修改此设置" : ""}>
+          <input
+            type="checkbox"
+            checked={allowLan}
+            disabled={isRunning}
+            onChange={(e) => toggleAllowLan(e.target.checked)}
+          />
+          允许局域网访问
+        </label>
+        {allowLan && (
+          <p className="tools-hint" style={{ marginTop: "4px" }}>
+            其他设备可通过 http://&lt;本机IP&gt;:{port} 访问
+          </p>
+        )}
+        {startError && <div className="proxy-start-error">{startError}</div>}
       </div>
       <div className="tools-section">
         <h3>默认目标</h3>
@@ -929,9 +1056,39 @@ function ProxyTab({
         <div style={{ marginTop: "12px" }}>
           {routes.map((route) => (
             <div key={route.id} className="tools-output-row" style={{ marginBottom: "4px", opacity: route.enabled ? 1 : 0.5 }}>
-              <code className="tools-code">{route.path_prefix} → {route.target}</code>
-              <button className="copy-btn" onClick={() => toggleRoute(route.id)}>{route.enabled ? "禁用" : "启用"}</button>
-              <button className="copy-btn" onClick={() => removeRoute(route.id)}>删除</button>
+              {editingId === route.id ? (
+                <>
+                  <input
+                    className="tools-input"
+                    placeholder="路径前缀，例如 /api"
+                    value={editPrefix}
+                    onChange={(e) => setEditPrefix(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") saveEdit(route); if (e.key === "Escape") cancelEdit(); }}
+                  />
+                  <input
+                    className="tools-input"
+                    placeholder="目标，例如 http://localhost:3000"
+                    value={editTarget}
+                    onChange={(e) => setEditTarget(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") saveEdit(route); if (e.key === "Escape") cancelEdit(); }}
+                  />
+                  <button
+                    className="copy-btn"
+                    disabled={!editPrefix.trim() || !editTarget.trim()}
+                    onClick={() => saveEdit(route)}
+                  >
+                    保存
+                  </button>
+                  <button className="copy-btn" onClick={cancelEdit}>取消</button>
+                </>
+              ) : (
+                <>
+                  <code className="tools-code">{route.path_prefix} → {route.target}</code>
+                  <button className="copy-btn" onClick={() => startEdit(route)}>编辑</button>
+                  <button className="copy-btn" onClick={() => toggleRoute(route.id)}>{route.enabled ? "禁用" : "启用"}</button>
+                  <button className="copy-btn" onClick={() => removeRoute(route.id)}>删除</button>
+                </>
+              )}
             </div>
           ))}
           {routes.length === 0 && <p className="tools-hint">暂无规则</p>}
@@ -942,8 +1099,38 @@ function ProxyTab({
         <p className="tools-hint" style={{ marginBottom: "6px" }}>
           点击一条请求可查看完整的请求与响应详情。
         </p>
+        <div className="proxy-log-filter">
+          <input
+            className="tools-input"
+            placeholder="搜索 URL"
+            value={logFilterText}
+            onChange={(e) => setLogFilterText(e.target.value)}
+          />
+          <select
+            className="proxy-filter-select"
+            value={logFilterMethod}
+            onChange={(e) => setLogFilterMethod(e.target.value)}
+          >
+            <option value="all">全部方法</option>
+            {LOG_METHODS.map((m) => (
+              <option key={m} value={m}>{m}</option>
+            ))}
+          </select>
+          <select
+            className="proxy-filter-select"
+            value={logFilterStatus}
+            onChange={(e) => setLogFilterStatus(e.target.value as LogStatusFilter)}
+          >
+            <option value="all">全部状态</option>
+            <option value="2xx">2xx</option>
+            <option value="3xx">3xx</option>
+            <option value="4xx">4xx</option>
+            <option value="5xx">5xx</option>
+            <option value="err">错误</option>
+          </select>
+        </div>
         <div className="req-log-list">
-          {[...requestLogs].reverse().map((log) => {
+          {shownLogs.map((log) => {
             const statusClass =
               log.status >= 500 ? "err" : log.status >= 400 ? "warn" : log.status > 0 ? "ok" : "err";
             const selected = selectedLog?.id === log.id;
@@ -963,6 +1150,7 @@ function ProxyTab({
             );
           })}
           {requestLogs.length === 0 && <p className="tools-hint">暂无请求记录</p>}
+          {requestLogs.length > 0 && shownLogs.length === 0 && <p className="tools-hint">无匹配的请求</p>}
         </div>
         {requestLogs.length > 0 && (
           <button
@@ -1291,6 +1479,34 @@ function IpTab() {
 
 type ProcView = "ports" | "processes";
 
+/** 可排序列。端口视图与进程视图共用一套 key，各自只暴露自己支持的子集。 */
+type ProcSortKey = "port" | "pid" | "process_name" | "state" | "memory_kb" | "name";
+type SortDir = "asc" | "desc";
+
+/** `kill_processes` 的单条结果。 */
+interface KillOutcome {
+  pid: number;
+  success: boolean;
+  error: string | null;
+}
+
+/** 端口状态 → 着色类名。UDP 无状态（空串）返回空，不着色。 */
+function portStateClass(state: string): string {
+  const s = state.trim().toUpperCase();
+  if (!s) return "";
+  if (s === "LISTENING" || s === "ESTABLISHED") return "proc-state-ok";
+  if (s === "TIME_WAIT" || s === "CLOSE_WAIT" || s.startsWith("SYN_")) return "proc-state-warn";
+  return "proc-state-err";
+}
+
+/** 数字列排序，null 恒排在末尾（不论升降序）。 */
+function cmpNullableNum(a: number | null, b: number | null, sign: number): number {
+  if (a == null && b == null) return 0;
+  if (a == null) return 1;    // null 总是排在末尾
+  if (b == null) return -1;
+  return (a - b) * sign;
+}
+
 function ProcessTab() {
   const [view, setView] = useState<ProcView>("ports");
   const [ports, setPorts] = useState<PortInfo[]>([]);
@@ -1301,15 +1517,27 @@ function ProcessTab() {
   // Two-step confirm: a mis-click on "结束" could kill the user's editor,
   // so the row must be armed before the kill actually fires.
   const [pendingKill, setPendingKill] = useState<number | null>(null);
+  // 自动刷新：默认关闭，间隔 5s。开启时才建 interval。
+  const [autoRefresh, setAutoRefresh] = useState(false);
+  const [autoMs, setAutoMs] = useState(5000);
+  // 排序状态。默认按端口/PID 升序。
+  const [sortKey, setSortKey] = useState<ProcSortKey>("port");
+  const [sortDir, setSortDir] = useState<SortDir>("asc");
+  // 端口视图按进程聚合。
+  const [groupByProc, setGroupByProc] = useState(false);
+  // 批量选择的 PID 集合。
+  const [selected, setSelected] = useState<number[]>([]);
+  const [pendingBatch, setPendingBatch] = useState(false);
   const { toast, showToast } = useToast();
   // Monotonic request id: a slow refresh must not overwrite the results of a
   // newer one (easy to trigger by toggling 端口/进程 quickly, since the two
   // fetches take different amounts of time).
   const reqSeq = useRef(0);
 
-  const refresh = useCallback(async () => {
+  // silent=true 用于自动刷新：不亮骨架，否则列表每隔几秒闪一次。
+  const refresh = useCallback(async (silent = false) => {
     const seq = ++reqSeq.current;
-    setLoading(true);
+    if (!silent) setLoading(true);
     setError(null);
     try {
       if (view === "ports") {
@@ -1336,6 +1564,21 @@ function ProcessTab() {
     void refresh();
   }, [refresh]);
 
+  // 切换视图 / 切换分组时清空选择：选中的 PID 在新列表里可能根本不存在。
+  useEffect(() => {
+    setSelected([]);
+    setPendingBatch(false);
+  }, [view, groupByProc]);
+
+  // 自动刷新：只有开启时才创建 interval，关闭/卸载即清理。
+  // 有行处于待确认（单行或批量）时暂停，否则确认按钮会被刷新掉。
+  const paused = pendingKill !== null || pendingBatch;
+  useEffect(() => {
+    if (!autoRefresh || paused) return;
+    const id = setInterval(() => { void refresh(true); }, autoMs);
+    return () => clearInterval(id);
+  }, [autoRefresh, autoMs, paused, refresh]);
+
   const kill = useCallback(
     async (pid: number, label: string, force: boolean) => {
       try {
@@ -1351,30 +1594,186 @@ function ProcessTab() {
     [refresh, showToast],
   );
 
+  // 批量结束：一次 invoke，按 KillOutcome[] 汇总成功/失败。
+  const killMany = useCallback(
+    async (pids: number[], force: boolean) => {
+      if (pids.length === 0) return;
+      try {
+        const outcomes = await invoke<KillOutcome[]>("kill_processes", { pids, force });
+        const failed = outcomes.filter((o) => !o.success);
+        if (failed.length === 0) {
+          showToast(`已结束 ${outcomes.length} 个进程`);
+        } else {
+          const head = failed
+            .slice(0, 3)
+            .map((o) => `${o.pid}：${o.error || "未知错误"}`)
+            .join("；");
+          const rest = failed.length > 3 ? `，等 ${failed.length} 项` : "";
+          showToast(`部分进程结束失败 — ${head}${rest}`, "error");
+        }
+      } catch (e) {
+        showToast(friendlyError(e, "批量结束失败"), "error");
+      } finally {
+        setSelected([]);
+        setPendingBatch(false);
+        await refresh();
+      }
+    },
+    [refresh, showToast],
+  );
+
+  const copyText = useCallback(
+    async (text: string) => {
+      try {
+        await navigator.clipboard.writeText(text);
+        showToast(`已复制 ${text}`);
+      } catch (e) {
+        showToast(friendlyError(e, "复制失败"), "error");
+      }
+    },
+    [showToast],
+  );
+
+  // 在资源管理器中定位可执行文件。系统进程常见失败，只提示不抛错。
+  const revealPath = useCallback(
+    async (pid: number) => {
+      try {
+        await invoke("reveal_process_path", { pid });
+      } catch (e) {
+        showToast(friendlyError(e, "无法定位该进程的文件"), "error");
+      }
+    },
+    [showToast],
+  );
+
+  const toggleSort = useCallback((key: ProcSortKey) => {
+    // 两个 setState 平铺写，不要把 setSortDir 塞进 setSortKey 的 updater —
+    // updater 在 StrictMode 下会被调用两次，方向会被翻转两次等于没翻。
+    setSortDir((d) => (sortKey === key ? (d === "asc" ? "desc" : "asc") : "asc"));
+    setSortKey(key);
+  }, [sortKey]);
+
   // Filtering is derived state, not stored — keeps the list and the query
   // from drifting out of sync after a refresh.
   const shownPorts = useMemo(() => {
     const q = filter.trim().toLowerCase();
-    if (!q) return ports;
-    return ports.filter(
-      (p) =>
-        String(p.port).includes(q) ||
-        p.process_name.toLowerCase().includes(q) ||
-        String(p.pid).includes(q) ||
-        p.local_addr.toLowerCase().includes(q),
-    );
-  }, [ports, filter]);
+    const base = !q
+      ? ports
+      : ports.filter(
+          (p) =>
+            String(p.port).includes(q) ||
+            p.process_name.toLowerCase().includes(q) ||
+            String(p.pid).includes(q) ||
+            p.local_addr.toLowerCase().includes(q),
+        );
+    // slice 后再排：base 可能就是 ports 本身，原地 sort 会改到 state。
+    return base.slice().sort((a, b) => {
+      const sign = sortDir === "asc" ? 1 : -1;
+      switch (sortKey) {
+        case "pid":
+          return (a.pid - b.pid) * sign;
+        case "state":
+          return a.state.localeCompare(b.state) * sign;
+        case "process_name":
+          return a.process_name.localeCompare(b.process_name) * sign;
+        case "memory_kb":
+          return cmpNullableNum(a.memory_kb, b.memory_kb, sign);
+        default:
+          return (a.port - b.port) * sign;
+      }
+    });
+  }, [ports, filter, sortKey, sortDir]);
+
+  // 分组模式：按 pid 聚合，组按端口数降序；组内沿用 shownPorts 已排好的顺序。
+  const portGroups = useMemo(() => {
+    if (!groupByProc) return [];
+    const map = new Map<number, PortInfo[]>();
+    for (const p of shownPorts) {
+      const list = map.get(p.pid);
+      if (list) list.push(p);
+      else map.set(p.pid, [p]);
+    }
+    return Array.from(map.entries())
+      .map(([pid, rows]) => ({
+        pid,
+        name: rows.find((r) => r.process_name)?.process_name || "—",
+        rows,
+      }))
+      .sort((a, b) => b.rows.length - a.rows.length);
+  }, [shownPorts, groupByProc]);
 
   const shownProcs = useMemo(() => {
     const q = filter.trim().toLowerCase();
-    if (!q) return procs;
-    return procs.filter(
-      (p) => p.name.toLowerCase().includes(q) || String(p.pid).includes(q),
-    );
-  }, [procs, filter]);
+    const base = !q
+      ? procs
+      : procs.filter(
+          (p) => p.name.toLowerCase().includes(q) || String(p.pid).includes(q),
+        );
+    return base.slice().sort((a, b) => {
+      const sign = sortDir === "asc" ? 1 : -1;
+      switch (sortKey) {
+        case "name":
+        case "process_name":
+          return a.name.localeCompare(b.name) * sign;
+        case "memory_kb":
+          return cmpNullableNum(a.memory_kb, b.memory_kb, sign);
+        default:
+          return (a.pid - b.pid) * sign;
+      }
+    });
+  }, [procs, filter, sortKey, sortDir]);
+
+  // 当前视图里所有可见 PID（去重），用于全选。
+  const visiblePids = useMemo(
+    () =>
+      Array.from(
+        new Set(view === "ports" ? shownPorts.map((p) => p.pid) : shownProcs.map((p) => p.pid)),
+      ),
+    [view, shownPorts, shownProcs],
+  );
+
+  const toggleSelect = useCallback((pid: number) => {
+    setSelected((prev) => (prev.includes(pid) ? prev.filter((x) => x !== pid) : [...prev, pid]));
+  }, []);
 
   const fmtMem = (kb: number | null) =>
     kb == null ? "—" : kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${kb} KB`;
+
+  // 可排序表头：点击切换，当前列带方向类名。
+  const sortTh = (key: ProcSortKey, label: string) => (
+    <th
+      className={`proc-sortable ${
+        sortKey === key ? (sortDir === "asc" ? "proc-sort-asc" : "proc-sort-desc") : ""
+      }`}
+      onClick={() => toggleSort(key)}
+      aria-sort={sortKey === key ? (sortDir === "asc" ? "ascending" : "descending") : "none"}
+    >
+      {label}
+    </th>
+  );
+
+  // 复制 + 定位两个快捷操作，两个视图共用。
+  const actionBtns = (pid: number, copyValue: string) => (
+    <>
+      <button className="proc-action-btn" onClick={() => void copyText(copyValue)}>
+        复制
+      </button>
+      <button className="proc-action-btn" onClick={() => void revealPath(pid)}>
+        定位文件
+      </button>
+    </>
+  );
+
+  const selectCell = (pid: number) => (
+    <td>
+      <input
+        type="checkbox"
+        checked={selected.includes(pid)}
+        onChange={() => toggleSelect(pid)}
+        aria-label={`选择进程 ${pid}`}
+      />
+    </td>
+  );
 
   const killCell = (pid: number, label: string) =>
     pendingKill === pid ? (
@@ -1399,6 +1798,12 @@ function ProcessTab() {
       </button>
     );
 
+    const switchView = (v: ProcView) => {
+    setView(v);
+    setSortKey(v === "ports" ? "port" : "pid");
+    setSortDir("asc");
+  };
+
   return (
     <div className="tools-tab-content">
       <div className="tools-section">
@@ -1408,7 +1813,7 @@ function ProcessTab() {
               role="tab"
               aria-selected={view === "ports"}
               className={`proc-switch-btn ${view === "ports" ? "active" : ""}`}
-              onClick={() => setView("ports")}
+              onClick={() => switchView("ports")}
             >
               端口
             </button>
@@ -1416,7 +1821,7 @@ function ProcessTab() {
               role="tab"
               aria-selected={view === "processes"}
               className={`proc-switch-btn ${view === "processes" ? "active" : ""}`}
-              onClick={() => setView("processes")}
+              onClick={() => switchView("processes")}
             >
               进程
             </button>
@@ -1431,6 +1836,36 @@ function ProcessTab() {
           <button className="tools-btn" onClick={() => void refresh()} disabled={loading}>
             {loading ? "刷新中…" : "刷新"}
           </button>
+          {/* 自动刷新 */}
+          <label className="proc-auto-refresh">
+            <input
+              type="checkbox"
+              checked={autoRefresh}
+              onChange={(e) => setAutoRefresh(e.target.checked)}
+            />
+            自动刷新
+            <select
+              value={autoMs}
+              onChange={(e) => setAutoMs(Number(e.target.value))}
+              disabled={!autoRefresh}
+              aria-label="刷新间隔"
+            >
+              <option value={2000}>2s</option>
+              <option value={5000}>5s</option>
+              <option value={10000}>10s</option>
+            </select>
+          </label>
+          {/* 端口视图：按进程分组 */}
+          {view === "ports" && (
+            <label className="proc-auto-refresh">
+              <input
+                type="checkbox"
+                checked={groupByProc}
+                onChange={(e) => setGroupByProc(e.target.checked)}
+              />
+              按进程分组
+            </label>
+          )}
         </div>
 
         {error && <div className="tools-error">{error}</div>}
@@ -1443,65 +1878,148 @@ function ProcessTab() {
 
         <div className="proc-table-wrap">
           {view === "ports" ? (
-            <table className="proc-table">
-              <thead>
-                <tr>
-                  <th>协议</th>
-                  <th>本地地址</th>
-                  <th>端口</th>
-                  <th>状态</th>
-                  <th>PID</th>
-                  <th>进程</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {shownPorts.map((p) => (
-                  <tr key={`${p.protocol}-${p.local_addr}-${p.port}-${p.foreign_addr}-${p.pid}`}>
-                    <td>{p.protocol}</td>
-                    <td className="proc-mono">{p.local_addr}</td>
-                    <td className="proc-mono proc-port">{p.port}</td>
-                    <td>{p.state}</td>
-                    <td className="proc-mono">{p.pid}</td>
-                    <td>{p.process_name || "—"}</td>
-                    <td>{killCell(p.pid, p.process_name || String(p.pid))}</td>
-                  </tr>
-                ))}
-                {!loading && shownPorts.length === 0 && (
+            groupByProc ? (
+              // 分组视图
+              <table className="proc-table">
+                <thead>
                   <tr>
-                    <td colSpan={7} className="proc-empty">无匹配端口</td>
+                    <th className="proc-check-col"><input type="checkbox" checked={visiblePids.length > 0 && visiblePids.every((p) => selected.includes(p))} onChange={() => { const all = visiblePids; setSelected((prev) => (prev.length === all.length ? [] : all)); }} aria-label="全选" /></th>
+                    {sortTh("port", "端口")}
+                    {sortTh("state", "状态")}
+                    {sortTh("pid", "PID")}
+                    {sortTh("process_name", "进程")}
+                    {sortTh("memory_kb", "内存")}
+                    <th>操作</th>
                   </tr>
-                )}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {portGroups.map((g) => (
+                    <Fragment key={g.pid}>
+                      <tr className="proc-group-header">
+                        <td colSpan={7}>
+                          {g.name} ({g.pid}) — {g.rows.length} 个端口
+                        </td>
+                      </tr>
+                      {g.rows.map((p) => (
+                        <tr key={`${p.protocol}-${p.local_addr}-${p.port}-${p.foreign_addr}-${p.pid}`}>
+                          {selectCell(p.pid)}
+                          <td className="proc-mono proc-port">{p.port}</td>
+                          <td className={portStateClass(p.state) || undefined}>{p.state || "—"}</td>
+                          <td className="proc-mono">{p.pid}</td>
+                          <td className="proc-name-cell" title={p.process_name}>{p.process_name || "—"}</td>
+                          <td className="proc-mono">{fmtMem(p.memory_kb)}</td>
+                          <td>
+                            {actionBtns(p.pid, String(p.port))}
+                            {killCell(p.pid, p.process_name || String(p.pid))}
+                          </td>
+                        </tr>
+                      ))}
+                    </Fragment>
+                  ))}
+                  {!loading && portGroups.length === 0 && (
+                    <tr><td colSpan={7} className="proc-empty">无匹配端口</td></tr>
+                  )}
+                </tbody>
+              </table>
+            ) : (
+              // 端口视图（展开）
+              <table className="proc-table">
+                <thead>
+                  <tr>
+                    <th className="proc-check-col"><input type="checkbox" checked={visiblePids.length > 0 && visiblePids.every((p) => selected.includes(p))} onChange={() => { const all = visiblePids; setSelected((prev) => (prev.length === all.length ? [] : all)); }} aria-label="全选" /></th>
+                    <th>协议</th>
+                    <th>本地地址</th>
+                    {sortTh("port", "端口")}
+                    {sortTh("state", "状态")}
+                    {sortTh("pid", "PID")}
+                    {sortTh("process_name", "进程")}
+                    {sortTh("memory_kb", "内存")}
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {shownPorts.map((p) => (
+                    <tr key={`${p.protocol}-${p.local_addr}-${p.port}-${p.foreign_addr}-${p.pid}`}>
+                      {selectCell(p.pid)}
+                      <td>{p.protocol}</td>
+                      <td className="proc-mono">{p.local_addr}</td>
+                      <td className="proc-mono proc-port">{p.port}</td>
+                      <td className={portStateClass(p.state) || undefined}>{p.state || "—"}</td>
+                      <td className="proc-mono">{p.pid}</td>
+                      <td className="proc-name-cell" title={p.process_name}>{p.process_name || "—"}</td>
+                      <td className="proc-mono">{fmtMem(p.memory_kb)}</td>
+                      <td>
+                        {actionBtns(p.pid, String(p.port))}
+                        {killCell(p.pid, p.process_name || String(p.pid))}
+                      </td>
+                    </tr>
+                  ))}
+                  {!loading && shownPorts.length === 0 && (
+                    <tr><td colSpan={9} className="proc-empty">无匹配端口</td></tr>
+                  )}
+                </tbody>
+              </table>
+            )
           ) : (
             <table className="proc-table">
               <thead>
                 <tr>
-                  <th>进程名</th>
-                  <th>PID</th>
-                  <th>内存</th>
+                  <th className="proc-check-col"><input type="checkbox" checked={visiblePids.length > 0 && visiblePids.every((p) => selected.includes(p))} onChange={() => { const all = visiblePids; setSelected((prev) => (prev.length === all.length ? [] : all)); }} aria-label="全选" /></th>
+                  {sortTh("name", "进程名")}
+                  {sortTh("pid", "PID")}
+                  {sortTh("memory_kb", "内存")}
                   <th>操作</th>
                 </tr>
               </thead>
               <tbody>
                 {shownProcs.map((p) => (
                   <tr key={p.pid}>
-                    <td>{p.name}</td>
+                    {selectCell(p.pid)}
+                    <td className="proc-name-cell" title={p.name}>{p.name}</td>
                     <td className="proc-mono">{p.pid}</td>
                     <td className="proc-mono">{fmtMem(p.memory_kb)}</td>
-                    <td>{killCell(p.pid, p.name)}</td>
+                    <td>
+                      {actionBtns(p.pid, String(p.pid))}
+                      {killCell(p.pid, p.name)}
+                    </td>
                   </tr>
                 ))}
                 {!loading && shownProcs.length === 0 && (
-                  <tr>
-                    <td colSpan={4} className="proc-empty">无匹配进程</td>
-                  </tr>
+                  <tr><td colSpan={5} className="proc-empty">无匹配进程</td></tr>
                 )}
               </tbody>
             </table>
           )}
         </div>
+
+        {/* 批量操作栏 */}
+        {selected.length > 0 && (
+          <div className="proc-batch-bar">
+            <span>已选 {selected.length} 项</span>
+            {!pendingBatch ? (
+              <>
+                <button className="copy-btn proc-danger" onClick={() => { setPendingBatch(true); }}>
+                  批量结束
+                </button>
+                <button className="copy-btn" onClick={() => { setSelected([]); setPendingBatch(false); }}>
+                  取消选择
+                </button>
+              </>
+            ) : (
+              <>
+                <button className="copy-btn proc-danger" onClick={() => void killMany(selected, false)}>
+                  确认结束
+                </button>
+                <button className="copy-btn proc-danger" onClick={() => void killMany(selected, true)}>
+                  强制结束
+                </button>
+                <button className="copy-btn" onClick={() => setPendingBatch(false)}>
+                  取消
+                </button>
+              </>
+            )}
+          </div>
+        )}
       </div>
 
       {toast && <div className={`tools-toast tools-toast-${toast.type}`}>{toast.msg}</div>}
@@ -1515,18 +2033,21 @@ function ProcessTab() {
 
 type Tab = "timestamp" | "cron" | "regex" | "ip" | "proxy" | "process";
 
-const TABS: { id: Tab; label: string; icon: string }[] = [
-  { id: "timestamp", label: "时间戳", icon: "🕐" },
-  { id: "cron",      label: "Cron",   icon: "⚙️" },
-  { id: "regex",     label: "正则",   icon: "🔍" },
-  { id: "ip",        label: "IP 查询", icon: "🌐" },
-  { id: "proxy",     label: "代理",   icon: "🔀" },
-  { id: "process",   label: "进程端口", icon: "🧩" },
+const TABS: { id: Tab; label: string; icon: ReactNode }[] = [
+  { id: "timestamp", label: "时间戳", icon: <IconClock /> },
+  { id: "cron",      label: "Cron",   icon: <IconSettings /> },
+  { id: "regex",     label: "正则",   icon: <IconSearch /> },
+  { id: "ip",        label: "IP 查询", icon: <IconGlobe /> },
+  { id: "proxy",     label: "代理",   icon: <IconShuffle /> },
+  { id: "process",   label: "进程端口", icon: <IconPuzzle /> },
 ];
 
 export default function ToolsApp() {
   useTheme();
   const [tab, setTab] = useState<Tab>("timestamp");
+  // 页面是否可见。用 state 承载而不是在渲染期读 document.visibilityState —— 后者
+  // 不是响应式源，放进 effect 依赖也不会触发重跑，定时器就永远收敛不了。
+  const [visible, setVisible] = useState(() => document.visibilityState === "visible");
   const [proxyState, setProxyState] = useState<ProxyState>({
     port: 10880,
     isRunning: false,
@@ -1534,17 +2055,34 @@ export default function ToolsApp() {
     routes: [],
     logs: [],
     requestLogs: [],
+    allowLan: false,
   });
+
+  useEffect(() => {
+    const onVisibility = () => setVisible(document.visibilityState === "visible");
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, []);
 
   // Intercept window close: hide instead of destroy so it can be reopened
   useEffect(() => {
     const win = getCurrentWindow();
-    const unlisten = win.onCloseRequested((event) => {
+    const unlistenClose = win.onCloseRequested((event) => {
       event.preventDefault();
       win.hide();
+      // WebView2 下 win.hide() 不保证触发 visibilitychange，所以这里手动置为
+      // 不可见，否则窗口藏起来后计时器/轮询还在跑。
+      setVisible(false);
+    });
+    // 重新显示时（托盘/快捷键）会拿到焦点，借此恢复可见。
+    // 只处理 focused === true：失焦不等于不可见（用户可能只是切到别的应用，
+    // 窗口仍在屏幕上），那时把时间戳停掉会显示成过期值。
+    const unlistenFocus = win.onFocusChanged(({ payload: focused }) => {
+      if (focused) setVisible(true);
     });
     return () => {
-      unlisten.then((fn) => fn());
+      unlistenClose.then((fn) => fn());
+      unlistenFocus.then((fn) => fn());
     };
   }, []);
 
@@ -1562,6 +2100,7 @@ export default function ToolsApp() {
           isRunning: cfg.running,
           defaultTarget: cfg.default_target,
           routes: cfg.routes,
+          allowLan: cfg.allow_lan,
         }));
       } catch {
         // silent
@@ -1584,11 +2123,13 @@ export default function ToolsApp() {
         ))}
       </div>
       <div className="tools-content">
-        {tab === "timestamp" && <TimestampTab />}
+        {tab === "timestamp" && <TimestampTab visible={visible} />}
         {tab === "cron" && <CronTab />}
         {tab === "regex" && <RegexTab />}
         {tab === "ip" && <IpTab />}
-        {tab === "proxy" && <ProxyTab state={proxyState} setState={setProxyState} />}
+        {tab === "proxy" && (
+          <ProxyTab state={proxyState} setState={setProxyState} visible={visible} />
+        )}
         {tab === "process" && <ProcessTab />}
       </div>
     </div>

@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback, memo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { JsonView } from "./JsonView";
 import { bodyFormatFor, checkBody, RAW_LANGS, type BodyCheck } from "./lib/bodyFormats";
 import { useTheme } from "./hooks/useTheme";
+import { useVerticalSplit } from "./hooks/useVerticalSplit";
 import { useToast } from "./hooks/useToast";
 import { friendlyError } from "./hooks/friendlyError";
 import { useDebouncedCallback } from "./hooks/useDebouncedCallback";
+import { IconChevron, IconFolder, IconHome, IconLock } from "./components/Icons";
 import "./App.css";
 import "./ApiApp.css";
 
@@ -13,7 +15,7 @@ import "./ApiApp.css";
  * API Platform - Postman-like HTTP client built on Tauri.
  *
  * Data model mirrors the Rust structs in src-tauri/src/models.rs:
- *   ApiState { nodes: ApiNode[], envs: ApiEnvironment[], active_env_id }
+ *   ApiState { nodes: ApiNode[], envs: ApiEnvironment[] }
  *   ApiNode  { id, parent_id, name, node_type: Folder|Request, request?: ApiRequest }
  *   ApiRequest { method, url, headers[], query[], path_vars[], body_type,
  *                body_raw_lang, body?, form_data[], url_encoded[],
@@ -26,7 +28,6 @@ import "./ApiApp.css";
  *   api_delete_node(id)
  *   api_save_env(env) -> ApiEnvironment
  *   api_delete_env(id)
- *   api_set_active_env(env_id?)
  *   api_execute(request) -> ApiResponse
  *   select_file() -> Option<String>      (native file picker via rfd)
  * ============================================================= */
@@ -105,13 +106,14 @@ interface ApiNode {
 interface ApiEnvironment {
   id: string;
   name: string;
+  base_url: string;
+  headers: [string, string][];
   vars: [string, string][];
 }
 
 interface ApiState {
   nodes: ApiNode[];
   envs: ApiEnvironment[];
-  active_env_id: string | null;
 }
 
 // ── Helpers ────────────────────────────────────────────────────
@@ -197,6 +199,59 @@ const formatBytes = (n: number): string => {
   return `${(n / (1024 * 1024)).toFixed(2)} MB`;
 };
 
+/// Variable names that usually identify *which machine* an environment points
+/// at, in descending order of confidence. Matched case-insensitively.
+const ENV_HINT_KEYS = ["host", "baseurl", "base_url", "url", "endpoint", "server"];
+const ENV_HINT_MAX_LEN = 28;
+
+/// `http://10.61.107.5:2001/api` -> `10.61.107.5:2001`. The scheme and path are
+/// constant noise; the authority is what actually differs between environments.
+/// Non-URL values pass through untouched.
+function envHintAuthority(value: string): string {
+  const schemeEnd = value.indexOf("://");
+  return schemeEnd >= 0 ? value.slice(schemeEnd + 3).split(/[/?#]/)[0] : value;
+}
+
+/// Label for an environment in the URL-bar dropdown, e.g. `dev - 10.61.107.5:2001`.
+///
+/// A bare name like `dev` doesn't answer the question users actually ask when
+/// switching environments ("where does this point?"), so we append the most
+/// representative variable we can find:
+///   0. the env's dedicated `base_url` -- authoritative when set;
+///   1. the first variable whose key matches ENV_HINT_KEYS -> show the value alone,
+///      reduced to its authority;
+///   2. otherwise the first variable with both key and value non-empty -> show
+///      `key=authority`, since an arbitrary variable name is itself information.
+///      The authority reduction matters *more* here, not less: a project that
+///      names its base URL `omsx` instead of `host` used to render the raw
+///      `omsx=http://1…`, which is pure noise — the truncation ate the address
+///      and left only the scheme.
+///   3. otherwise nothing -- just the name, never a dangling " - ".
+/// Long values are truncated so the dropdown can't push the URL input off-screen.
+/// Display only: `env.name` stays untouched for the sidebar, renames and storage.
+function envSelectLabel(env: ApiEnvironment): string {
+  const filled = env.vars.filter(([k, v]) => k.trim() && v.trim());
+  let hint = "";
+  // The dedicated base URL is by definition *the* address of this env, so it
+  // outranks any guess made from variable names.
+  if (env.base_url?.trim()) {
+    hint = envHintAuthority(env.base_url.trim());
+  }
+  for (const key of hint ? [] : ENV_HINT_KEYS) {
+    const match = filled.find(([k]) => k.trim().toLowerCase() === key);
+    if (match) {
+      hint = envHintAuthority(match[1].trim());
+      break;
+    }
+  }
+  if (!hint && filled.length > 0) {
+    hint = `${filled[0][0].trim()}=${envHintAuthority(filled[0][1].trim())}`;
+  }
+  if (!hint) return env.name;
+  if (hint.length > ENV_HINT_MAX_LEN) hint = `${hint.slice(0, ENV_HINT_MAX_LEN)}…`;
+  return `${env.name} - ${hint}`;
+}
+
 /* =============================================================
  * Theme hook is provided by ./hooks/useTheme (shared across all
  * windows). Reading it here directly is what caused 4 copies of
@@ -215,11 +270,15 @@ function EnvVarRow({
   k, v,
   onChange,
   onRemove,
+  keyPlaceholder = "变量名",
+  valPlaceholder = "值",
 }: {
   k: string;
   v: string;
   onChange: (next: [string, string]) => void;
   onRemove: () => void;
+  keyPlaceholder?: string;
+  valPlaceholder?: string;
 }) {
   const [draftK, setDraftK] = useState(k);
   const [draftV, setDraftV] = useState(v);
@@ -240,7 +299,7 @@ function EnvVarRow({
           setDraftK(next);
           onChange([next, draftV]);
         }}
-        placeholder="变量名"
+        placeholder={keyPlaceholder}
       />
       <input
         className="api-kv-input"
@@ -251,7 +310,7 @@ function EnvVarRow({
           setDraftV(next);
           onChange([draftK, next]);
         }}
-        placeholder="值"
+        placeholder={valPlaceholder}
       />
       <button className="api-mini-btn" onClick={onRemove} title="删除">×</button>
     </div>
@@ -415,7 +474,7 @@ function MoveToModal({ node, nodes, onConfirm, onCancel }: MoveToModalProps) {
           style={{ paddingLeft: 8 + depth * 16 }}
           onClick={() => setSelected(folder.id)}
         >
-          <span className="api-moveto-icon">📁</span>
+          <span className="api-moveto-icon"><IconFolder /></span>
           <span className="api-moveto-name">{folder.name}</span>
         </button>
         {children.map(child => renderFolder(child, depth + 1))}
@@ -442,7 +501,7 @@ function MoveToModal({ node, nodes, onConfirm, onCancel }: MoveToModalProps) {
             className={"api-moveto-item api-moveto-root" + (selected === null ? " api-moveto-selected" : "")}
             onClick={() => setSelected(null)}
           >
-            <span className="api-moveto-icon">🏠</span>
+            <span className="api-moveto-icon"><IconHome /></span>
             <span className="api-moveto-name">根目录（顶层）</span>
           </button>
           {rootFolders.map(f => renderFolder(f, 1))}
@@ -459,6 +518,198 @@ function MoveToModal({ node, nodes, onConfirm, onCancel }: MoveToModalProps) {
           >
             移动到此处
           </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Modal: Environment Manager ─────────────────────────────────
+//
+// Environments used to live pinned to the bottom of the sidebar, which
+// had two problems: it stole vertical space from the request tree, and
+// the value inputs were far too narrow to read a URL (`http://10…`).
+//
+// It also conflated two different things: an env was only *expandable*
+// while it was *active*, so inspecting a variable forced you to switch
+// environments. This modal now only *manages* envs (create/edit/delete);
+// which env applies is a per-request choice made in the URL bar, so
+// there is no "active" state to show here at all.
+
+interface EnvManagerModalProps {
+  envs: ApiEnvironment[];
+  onAdd: () => void;
+  onUpdate: (env: ApiEnvironment) => void;
+  onDelete: (env: ApiEnvironment) => void;
+  onClose: () => void;
+}
+
+function EnvManagerModal({
+  envs, onAdd, onUpdate, onDelete, onClose,
+}: EnvManagerModalProps) {
+  // Nothing is "active" any more — just inspect the first env by default.
+  const [viewingId, setViewingId] = useState<string | null>(
+    envs.length > 0 ? envs[0].id : null
+  );
+
+  // Follow newly created envs. `addEnv` appends, so a growing list means
+  // the last entry is the one the user just made — jump to it, otherwise
+  // the right pane would keep showing the previously viewed env.
+  const prevCountRef = useRef(envs.length);
+  useEffect(() => {
+    if (envs.length > prevCountRef.current) setViewingId(envs[envs.length - 1].id);
+    prevCountRef.current = envs.length;
+  }, [envs]);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  // The viewed env may vanish (deleted); fall back rather than blank out.
+  const viewing = envs.find(e => e.id === viewingId) ?? envs[0] ?? null;
+
+  return (
+    <div className="api-modal-overlay" onMouseDown={onClose}>
+      <div className="api-modal api-env-modal" onMouseDown={e => e.stopPropagation()}>
+        <div className="api-modal-title">环境变量</div>
+
+        {envs.length === 0 ? (
+          <div className="api-env-modal-empty">
+            <div className="api-hint">
+              还没有环境。环境用来存放 <code>{"{{host}}"}</code> 这类变量，
+              可在 URL 和请求头中通过 <code>{"{{变量名}}"}</code> 引用。
+            </div>
+            <button className="api-btn api-btn-primary" onClick={onAdd}>新建第一个环境</button>
+          </div>
+        ) : (
+          <div className="api-env-modal-body">
+            {/* Left: env list */}
+            <div className="api-env-modal-list">
+              {envs.map(env => {
+                const isViewing = viewing?.id === env.id;
+                return (
+                  <div
+                    key={env.id}
+                    className={"api-env-modal-item" + (isViewing ? " viewing" : "")}
+                    role="button"
+                    tabIndex={0}
+                    aria-current={isViewing}
+                    onClick={() => setViewingId(env.id)}
+                    onKeyDown={e => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        setViewingId(env.id);
+                      }
+                    }}
+                  >
+                    <span className="api-env-modal-name" title={env.name}>{env.name}</span>
+                    <button
+                      className="api-mini-btn"
+                      title="删除环境"
+                      onClick={e => { e.stopPropagation(); onDelete(env); }}
+                    >×</button>
+                  </div>
+                );
+              })}
+              <button className="api-env-add-btn" onClick={onAdd}>+ 新建环境</button>
+            </div>
+
+            {/* Right: variables of the viewed env */}
+            <div className="api-env-modal-vars">
+              {viewing && (
+                <>
+                  <div className="api-env-modal-varhead">
+                    <span>{viewing.name}</span>
+                  </div>
+
+                  {/* Base URL: a dedicated slot, not a magically-named var.
+                      Relative request URLs get this prepended; absolute ones
+                      (http/https) are left alone. */}
+                  <div className="api-env-section">
+                    <div className="api-env-section-title">基础地址</div>
+                    <input
+                      className="api-input api-env-baseurl"
+                      value={viewing.base_url ?? ""}
+                      placeholder="http://10.61.107.5:2001"
+                      onChange={e => onUpdate({ ...viewing, base_url: e.target.value })}
+                    />
+                    <div className="api-hint">
+                      填写后，URL 只需写 <code>/front-api/orders</code>；
+                      以 http(s) 开头的完整地址不受影响。
+                    </div>
+                  </div>
+
+                  {/* Shared headers: merged into every request in this env. */}
+                  <div className="api-env-section">
+                    <div className="api-env-section-title">公共请求头</div>
+                    <div className="api-env-modal-varlist">
+                      {(viewing.headers ?? []).map(([k, v], i) => (
+                        <EnvVarRow
+                          key={i}
+                          k={k}
+                          v={v}
+                          keyPlaceholder="Authorization"
+                          valPlaceholder="Bearer {{token}}"
+                          onChange={next => {
+                            const arr = (viewing.headers ?? []).map((p, idx) => idx === i ? next : p);
+                            onUpdate({ ...viewing, headers: arr });
+                          }}
+                          onRemove={() => {
+                            const next = (viewing.headers ?? []).filter((_, idx) => idx !== i);
+                            onUpdate({ ...viewing, headers: next.length > 0 ? next : [["", ""]] });
+                          }}
+                        />
+                      ))}
+                      <button
+                        className="api-env-add-btn"
+                        onClick={() => onUpdate({
+                          ...viewing, headers: [...(viewing.headers ?? []), ["", ""]],
+                        })}
+                      >+ 添加请求头</button>
+                    </div>
+                    <div className="api-hint">
+                      自动加到该环境下的每个请求。请求自己设置同名请求头会覆盖它；
+                      把值留空则该请求不发送这条。
+                    </div>
+                  </div>
+
+                  <div className="api-env-section">
+                    <div className="api-env-section-title">变量</div>
+                    <div className="api-env-modal-varlist">
+                      {viewing.vars.map(([k, v], i) => (
+                        <EnvVarRow
+                          key={i}
+                          k={k}
+                          v={v}
+                          onChange={next => {
+                            const arr = viewing.vars.map((p, idx) => idx === i ? next : p);
+                            onUpdate({ ...viewing, vars: arr });
+                          }}
+                          onRemove={() => {
+                            const next = viewing.vars.filter((_, idx) => idx !== i);
+                            onUpdate({ ...viewing, vars: next.length > 0 ? next : [["", ""]] });
+                          }}
+                        />
+                      ))}
+                      <button
+                        className="api-env-add-btn"
+                        onClick={() => onUpdate({ ...viewing, vars: [...viewing.vars, ["", ""]] })}
+                      >+ 添加变量</button>
+                    </div>
+                    <div className="api-hint">
+                      在 URL、请求头、请求体中用 <code>{"{{变量名}}"}</code> 引用。
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
+        <div className="api-modal-actions">
+          <button className="api-btn api-btn-primary" onClick={onClose}>完成</button>
         </div>
       </div>
     </div>
@@ -511,35 +762,28 @@ function KvEditor({ pairs, onChange, keyPlaceholder = "键名", valuePlaceholder
     });
   }, [pairs]);
 
+  // NOTE: `onChange` must never be called from inside a `setDraft` updater.
+  // State updaters have to be pure — React may invoke them twice (StrictMode)
+  // and does so during the render phase, which turns the parent's setState
+  // into "update ApiApp while rendering KvEditor". Compute the next value
+  // from `draft` first, then commit and notify as two plain statements.
+  const commit = (next: [string, string][]) => {
+    setDraft(next);
+    onChange(next);
+  };
+
   const update = (i: number, field: 0 | 1, val: string) => {
-    setDraft(prev => {
-      const next: [string, string][] = prev.map(([k, v], idx) =>
-        idx === i ? (field === 0 ? [val, v] : [k, val]) as [string, string] : [k, v] as [string, string]
-      );
-      onChange(next);
-      return next;
-    });
+    commit(draft.map(([k, v], idx) =>
+      idx === i ? (field === 0 ? [val, v] : [k, val]) as [string, string] : [k, v] as [string, string]
+    ));
   };
 
   const addRow = () => {
-    setDraft(prev => {
-      const next = [...prev, ["", ""] as [string, string]];
-      onChange(next);
-      return next;
-    });
+    commit([...draft, ["", ""] as [string, string]]);
   };
 
   const removeRow = (i: number) => {
-    setDraft(prev => {
-      let next: [string, string][];
-      if (prev.length <= 1) {
-        next = [["", ""]];
-      } else {
-        next = prev.filter((_, idx) => idx !== i);
-      }
-      onChange(next);
-      return next;
-    });
+    commit(draft.length <= 1 ? [["", ""]] : draft.filter((_, idx) => idx !== i));
   };
 
   return (
@@ -697,7 +941,7 @@ function PathVarEditor({ urlKeys, stored, onChange }: PathVarEditorProps) {
             <span
               className="api-kv-delete api-kv-delete-info"
               title="该变量名由 URL 定义，无法在此删除"
-            >🔒</span>
+            ><IconLock /></span>
           </div>
         );
       })}
@@ -738,36 +982,26 @@ function FormDataEditor({ fields, onChange }: FormDataEditorProps) {
     });
   }, [fields]);
 
+  // See the note on KvEditor.commit: `onChange` must stay out of the
+  // `setDraft` updater, which React treats as pure and may run during render.
+  const commit = (next: FormField[]) => {
+    setDraft(next);
+    onChange(next);
+  };
+
   const update = (i: number, patch: Partial<FormField>) => {
-    setDraft(prev => {
-      const next: FormField[] = prev.map((f, idx) =>
-        idx === i ? ({ ...f, ...patch } as FormField) : f
-      );
-      onChange(next);
-      return next;
-    });
+    commit(draft.map((f, idx) => (idx === i ? ({ ...f, ...patch } as FormField) : f)));
   };
 
   const addRow = () => {
     const newField: FormField = { key: "", value: "", type: "text" as const };
-    setDraft(prev => {
-      const next: FormField[] = [...prev, newField];
-      onChange(next);
-      return next;
-    });
+    commit([...draft, newField]);
   };
 
   const removeRow = (i: number) => {
-    setDraft(prev => {
-      let next: FormField[];
-      if (prev.length <= 1) {
-        next = [{ key: "", value: "", type: "text" as const, file_path: null, file_name: null }];
-      } else {
-        next = prev.filter((_, idx) => idx !== i);
-      }
-      onChange(next);
-      return next;
-    });
+    commit(draft.length <= 1
+      ? [{ key: "", value: "", type: "text" as const, file_path: null, file_name: null }]
+      : draft.filter((_, idx) => idx !== i));
   };
 
   const pickFile = async (i: number) => {
@@ -994,12 +1228,13 @@ function BodyEditor({ req, onChange }: BodyEditorProps) {
     });
   }, [req]);
 
+  // Same rule as the other draft-buffered editors: keep `onChange` out of the
+  // `setDraft` updater so the updater stays pure (React may run it mid-render,
+  // which surfaces as "cannot update ApiApp while rendering <this>").
   const commit = (patch: Partial<ApiRequest>) => {
-    setDraft(prev => {
-      const next: ApiRequest = { ...prev, ...patch };
-      onChange(next);
-      return next;
-    });
+    const next: ApiRequest = { ...draft, ...patch };
+    setDraft(next);
+    onChange(next);
   };
 
   const setBodyType = (bt: string) => commit({ body_type: bt });
@@ -1202,37 +1437,83 @@ function UrlInput({ value, onCommit, onEnter }: { value: string; onCommit: (v: s
 
 interface TreeNodeProps {
   node: ApiNode;
-  nodes: ApiNode[];
+  /**
+   * parent id -> children, pre-grouped **once** by the parent component.
+   *
+   * This replaces the old `nodes: ApiNode[]` + `nodes.filter(n => n.parent_id === node.id)`
+   * pattern, which re-scanned the whole collection inside every single node —
+   * O(n^2) per render of the sidebar. Building the map here (per node) instead
+   * of at the top would be even worse than the filter, hence it is passed down.
+   */
+  childrenMap: Map<string, ApiNode[]>;
   selectedId: string | null;
   collapsedIds: Set<string>;
+  /**
+   * Recursion depth, used only as a stack-overflow guard: an imported JSON
+   * collection can contain a parent cycle (a -> b -> a). The map build tolerates
+   * that, but rendering would recurse forever.
+   */
+  depth?: number;
   onSelect: (id: string) => void;
   onToggle: (id: string) => void;
   onRename: (node: ApiNode) => void;
   onDelete: (node: ApiNode) => void;
   onDuplicate: (node: ApiNode) => void;
   onContextMenu: (e: React.MouseEvent, node: ApiNode) => void;
+  /** 当前正被拖拽的节点 id（源节点淡化显示），无拖拽时为 null。 */
+  draggingId: string | null;
+  /** 当前悬停且可放入的目标文件夹 id（高亮显示），否则为 null。 */
+  dragOverId: string | null;
+  onDragStart: (e: React.DragEvent, node: ApiNode) => void;
+  onDragOver: (e: React.DragEvent, node: ApiNode) => void;
+  onDragLeave: (e: React.DragEvent, node: ApiNode) => void;
+  onDrop: (e: React.DragEvent, node: ApiNode) => void;
+  onDragEnd: () => void;
 }
 
-function TreeNode({
-  node, nodes, selectedId, collapsedIds,
+// memo: the sidebar tree re-renders on every keystroke in the request editor
+// (the whole ApiApp re-renders). With all callbacks below wrapped in
+// useCallback and `childrenMap` memoised on `state.nodes`, memo lets React skip
+// the entire subtree unless something the node actually shows has changed.
+const TreeNode = memo(function TreeNode({
+  node, childrenMap, selectedId, collapsedIds, depth = 0,
   onSelect, onToggle, onRename, onDelete, onDuplicate, onContextMenu,
+  draggingId, dragOverId, onDragStart, onDragOver, onDragLeave, onDrop, onDragEnd,
 }: TreeNodeProps) {
-  const children = nodes.filter(n => n.parent_id === node.id);
+  // Cycle guard, see `depth` above. 64 is far deeper than any hand-built
+  // collection, so a legitimate tree is never truncated.
+  if (depth > 64) return null;
+
+  const children = childrenMap.get(node.id) ?? [];
   const isFolder = node.node_type === "folder";
   const isCollapsed = collapsedIds.has(node.id);
   const isSelected = selectedId === node.id;
 
   return (
     <div className="api-tree-folder">
+      {/*
+        The row handlers stay inline arrows *here* (closing over `node`) rather
+        than being built per-node in the parent: a fresh function per child from
+        the parent would break the `memo` above on every parent render. They are
+        deliberately not useCallback-wrapped — these props land on a plain DOM
+        element (nothing to memoise for) and hooks may not run after the `depth`
+        early return above.
+      */}
       <div
-        className={`api-tree-row${isSelected ? " selected" : ""}${isCollapsed ? " collapsed" : ""}`}
+        className={`api-tree-row${isSelected ? " selected" : ""}${isCollapsed ? " collapsed" : ""}${draggingId === node.id ? " dragging" : ""}${dragOverId === node.id ? " drop-target" : ""}`}
+        draggable
+        onDragStart={e => onDragStart(e, node)}
+        onDragOver={e => onDragOver(e, node)}
+        onDragLeave={e => onDragLeave(e, node)}
+        onDrop={e => onDrop(e, node)}
+        onDragEnd={onDragEnd}
         onClick={() => isFolder ? onToggle(node.id) : onSelect(node.id)}
         onDoubleClick={() => onRename(node)}
         onContextMenu={e => onContextMenu(e, node)}
       >
-        {isFolder && <span className="api-tree-icon">▼</span>}
+        {isFolder && <span className="api-tree-icon"><IconChevron /></span>}
         {isFolder ? (
-          <span className="api-tree-name">📁 {node.name}</span>
+          <span className="api-tree-name"><IconFolder /> {node.name}</span>
         ) : (
           <>
             <span className={`api-method api-method-${(node.request?.method || "get").toLowerCase()}`}>
@@ -1248,22 +1529,30 @@ function TreeNode({
             <TreeNode
               key={child.id}
               node={child}
-              nodes={nodes}
+              childrenMap={childrenMap}
               selectedId={selectedId}
               collapsedIds={collapsedIds}
+              depth={depth + 1}
               onSelect={onSelect}
               onToggle={onToggle}
               onRename={onRename}
               onDelete={onDelete}
               onDuplicate={onDuplicate}
               onContextMenu={onContextMenu}
+              draggingId={draggingId}
+              dragOverId={dragOverId}
+              onDragStart={onDragStart}
+              onDragOver={onDragOver}
+              onDragLeave={onDragLeave}
+              onDrop={onDrop}
+              onDragEnd={onDragEnd}
             />
           ))}
         </div>
       )}
     </div>
   );
-}
+});
 // ── Response Viewer ────────────────────────────────────────────
 
 interface ResponseViewerProps {
@@ -1276,6 +1565,51 @@ function ResponseViewer({ response, loading, error }: ResponseViewerProps) {
   const [tab, setTab] = useState<"body" | "headers" | "request">("body");
   const [view, setView] = useState<"pretty" | "raw" | "text">("pretty");
   const [copied, setCopied] = useState(false);
+  // Binary download state. Kept here rather than in the parent because it is
+  // purely presentational and must reset whenever a new response arrives.
+  const [saving, setSaving] = useState(false);
+  const [savedPath, setSavedPath] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  // A fresh response invalidates any previous download, otherwise the old
+  // "已保存到 …" line would sit under an unrelated result.
+  useEffect(() => {
+    setSavedPath(null);
+    setSaveError(null);
+  }, [response]);
+
+  const handleSaveBinary = useCallback(async (resp: ApiResponse) => {
+    if (!resp.body) {
+      setSaveError("响应体为空，无内容可保存。");
+      return;
+    }
+    setSaving(true);
+    setSaveError(null);
+    try {
+      // `body` holds base64 for binary responses; the backend decodes it to
+      // raw bytes so the file is written byte-for-byte.
+      const path = await invoke<string | null>("api_save_binary_body", {
+        bodyBase64: resp.body,
+        url: resp.final_url ?? "",
+        headers: resp.headers,
+      });
+      // `null` means the user dismissed the save dialog — not an error, and
+      // nothing to report in the UI.
+      if (path) setSavedPath(path);
+    } catch (e) {
+      setSaveError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  }, []);
+
+  const handleReveal = useCallback(async (path: string) => {
+    try {
+      await invoke("api_reveal_path", { path });
+    } catch (e) {
+      setSaveError(String(e));
+    }
+  }, []);
 
   // Parse once, memoized. This used to call `JSON.parse` twice per render
   // (once for the `isJson` probe, once inside the JSX) on a body that can be
@@ -1392,6 +1726,27 @@ function ResponseViewer({ response, loading, error }: ResponseViewerProps) {
               // a screenful of replacement characters.
               <div className="api-hint">
                 二进制响应（{formatBytes(response.body_size ?? 0)}），已不作文本展示。
+                <div className="api-hint-actions">
+                  <button
+                    className="api-btn api-btn-secondary api-btn-sm"
+                    onClick={() => handleSaveBinary(response)}
+                    disabled={saving}
+                  >
+                    {saving ? "保存中…" : "保存文件"}
+                  </button>
+                  {savedPath && (
+                    <button
+                      className="api-btn api-btn-secondary api-btn-sm"
+                      onClick={() => handleReveal(savedPath)}
+                    >
+                      打开所在文件夹
+                    </button>
+                  )}
+                </div>
+                {saveError && <div className="api-error-inline">⚠ {saveError}</div>}
+                {savedPath && (
+                  <div className="api-saved-path">已保存到：{savedPath}</div>
+                )}
               </div>
             ) : response.body ? (
               <>
@@ -1466,7 +1821,9 @@ export default function ApiApp() {
   // listeners are attached. The hook doesn't return anything we need here;
   // JsonView (and any future themed child) reads theme via document.documentElement.
   useTheme();
-  const [state, setState] = useState<ApiState>({ nodes: [], envs: [], active_env_id: null });
+  // Editor/response split height — draggable, persisted, ratio-based.
+  const split = useVerticalSplit();
+  const [state, setState] = useState<ApiState>({ nodes: [], envs: [] });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
@@ -1480,6 +1837,7 @@ export default function ApiApp() {
   const [confirmModal, setConfirmModal] = useState<{ title: string; message: string; confirmText?: string; danger?: boolean; onConfirm: () => void } | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
   const [moveToModal, setMoveToModal] = useState<{ node: ApiNode } | null>(null);
+  const [envModalOpen, setEnvModalOpen] = useState(false);
 
   // Shared toast hook. Identical to the clipboard window's: de-dupes the
   // same message text, clears its own timer on unmount, and renders the
@@ -1508,7 +1866,48 @@ export default function ApiApp() {
   // ── Derived ──────────────────────────────────────────────────
 
   const selectedNode = state.nodes.find(n => n.id === selectedId) || null;
-  const activeEnv = state.envs.find(e => e.id === state.active_env_id) || null;
+
+  // Pre-group the flat node list into parent -> children **once per nodes change**.
+  //
+  // 为什么放在顶层而不是 TreeNode 内部：TreeNode 里原来是
+  // `nodes.filter(n => n.parent_id === node.id)`，每个节点都要扫一遍全表 → O(n^2)；
+  // 若改成在 TreeNode 内部建 Map，则每个节点建一次 Map，比 filter 还慢。
+  //
+  // 顺便修掉一个真实存在的丢数据 Bug：parent_id 指向已不存在的 id（dangling
+  // parent，例如导入的 JSON 或删除父节点时残留）的节点，既进不了根列表
+  // （不等于 null）、也进不了任何 children（没有匹配的 node.id），于是在侧栏
+  // 彻底消失 —— 但它仍在 state.nodes 里并会被保存，用户视角是数据凭空不见。
+  // Rust 侧的 collect_descendants_tolerates_dangling_parent_references 说明这个
+  // 场景确实出现过。这里把孤儿（以及自环 pid === n.id）一律提升为根节点。
+  //
+  // 不做任何排序：原来的 filter 保留 nodes 的原始顺序，用户手动排的顺序依赖它。
+  const { childrenMap, roots } = useMemo(() => {
+    const ids = new Set(state.nodes.map(n => n.id));
+    const map = new Map<string, ApiNode[]>();
+    const rootList: ApiNode[] = [];
+    for (const n of state.nodes) {
+      const pid = n.parent_id;
+      // `pid == null` 同时覆盖 null 与 undefined（旧数据可能缺字段）
+      if (pid == null || pid === n.id || !ids.has(pid)) {
+        rootList.push(n);
+        continue;
+      }
+      let arr = map.get(pid);
+      if (!arr) { arr = []; map.set(pid, arr); }
+      arr.push(n);
+    }
+    return { childrenMap: map, roots: rootList };
+  }, [state.nodes]);
+
+  // 提到外面并 useCallback：原来是写在 JSX 里的内联箭头，每次渲染都是新函数，
+  // 会直接让 memo 化的 TreeNode 全部重渲染。函数式更新所以 deps 为空。
+  const toggleCollapsed = useCallback((id: string) => {
+    setCollapsedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
 
   // Auto-sync path vars with URL
   const urlPathVars = selectedNode?.request ? extractPathVars(selectedNode.request.url) : [];
@@ -1570,11 +1969,15 @@ export default function ApiApp() {
         }
         return { ...prev, nodes: prev.nodes.filter(n => !toRemove.has(n.id)) };
       });
-      if (selectedId === id) setSelectedId(null);
+      // 用函数式更新读当前选中项，而不是闭包里的 `selectedId`：
+      // 这样 deps 里不需要 selectedId，deleteNodeById 的引用在整个生命周期内
+      // 保持稳定 → 依赖它的 confirmDeleteNode / showContextMenu 也才能稳定，
+      // 否则每次切换选中节点都会让整棵树的 memo 失效。
+      setSelectedId(cur => (cur === id ? null : cur));
     } catch (e) {
       showToast(`删除失败: ${friendlyError(e)}`, "error");
     }
-  }, [selectedId, showToast]);
+  }, [showToast]);
 
   const duplicateNode = useCallback((node: ApiNode) => {
     const copy: ApiNode = {
@@ -1593,8 +1996,16 @@ export default function ApiApp() {
   }, [saveNode]);
 
   // ── Add operations ──────────────────────────────────────────
+  //
+  // 以下几个回调都用 useCallback 包住，deps 只有 `saveNode` / `deleteNodeById`
+  // （两者本身也是稳定的 useCallback）。这是 `React.memo(TreeNode)` 生效的前提：
+  // 只要有一个回调每次渲染都换新引用，整棵树的 memo 命中率就是 0。
+  // 顺序上必须先稳定这些「叶子」，再包依赖它们的 showContextMenu。
+  //
+  // 它们内部只用函数式 setState（`setState(prev => ...)`），不读 state.nodes，
+  // 因此不会捕获过期的 state。
 
-  const addFolder = (parentId: string | null) => {
+  const addFolder = useCallback((parentId: string | null) => {
     setInputModal({
       title: "新建文件夹",
       label: "文件夹名称",
@@ -1609,9 +2020,9 @@ export default function ApiApp() {
         saveNode(node);
       },
     });
-  };
+  }, [saveNode]);
 
-  const addRequest = (parentId: string | null) => {
+  const addRequest = useCallback((parentId: string | null) => {
     setInputModal({
       title: "新建请求",
       label: "请求名称",
@@ -1625,11 +2036,11 @@ export default function ApiApp() {
         saveNode(node);
       },
     });
-  };
+  }, [saveNode]);
 
   // ── Rename ───────────────────────────────────────────────────
 
-  const startRename = (node: ApiNode) => {
+  const startRename = useCallback((node: ApiNode) => {
     setInputModal({
       title: `重命名 ${node.node_type === "folder" ? "文件夹" : "请求"}`,
       label: "名称",
@@ -1643,7 +2054,7 @@ export default function ApiApp() {
         saveNode(updated);
       },
     });
-  };
+  }, [saveNode]);
 
   // Confirm-then-delete is intentionally a direct call here. The previous
   // implementation routed through showContextMenu with a synthesised event
@@ -1651,7 +2062,7 @@ export default function ApiApp() {
   // context-menu state and produced a *visible* but disabled popup behind the
   // confirm dialog. Going through ConfirmModal keeps the user flow simple and
   // removes the `as any` cast.
-  const confirmDeleteNode = (node: ApiNode) => {
+  const confirmDeleteNode = useCallback((node: ApiNode) => {
     setConfirmModal({
       title: "删除",
       message: `确认删除 "${node.name}"?${node.node_type === "folder" ? "\n其下所有内容将一并删除。" : ""}`,
@@ -1659,11 +2070,13 @@ export default function ApiApp() {
       danger: true,
       onConfirm: () => { setConfirmModal(null); deleteNodeById(node.id); },
     });
-  };
+  }, [deleteNodeById]);
 
   // ── Context menu ─────────────────────────────────────────────
 
-  const showContextMenu = (e: React.MouseEvent, node: ApiNode) => {
+  // deps 全是上面那批稳定的 useCallback，所以 showContextMenu 本身也稳定，
+  // 可以安全地作为 prop 传给 memo 化的 TreeNode。
+  const showContextMenu = useCallback((e: React.MouseEvent, node: ApiNode) => {
     e.preventDefault();
     e.stopPropagation();
     const items: ContextMenuItem[] = [
@@ -1679,7 +2092,7 @@ export default function ApiApp() {
     }
     items.push({ label: "删除", danger: true, onClick: () => confirmDeleteNode(node) });
     setContextMenu({ x: e.clientX, y: e.clientY, items });
-  };
+  }, [startRename, duplicateNode, addFolder, addRequest, confirmDeleteNode]);
 
   // ── Move to (context menu → modal) ───────────────────────────
 
@@ -1706,6 +2119,111 @@ export default function ApiApp() {
     saveNode(moved);
     setMoveToModal(null);
   };
+
+  // ── Drag & drop (tree reordering by parent) ──────────────────
+
+  // 被拖节点本身放 ref：回调里要读它的最新值，但它不参与渲染，
+  // 放 state 只会让每个 dragover 都被迫读一次陈旧闭包。
+  const dragNodeRef = useRef<ApiNode | null>(null);
+  // 这两个 id 要驱动样式，只能是 state；写入前都做等值判断，避免
+  // dragover（每几十毫秒触发一次）无意义地 setState。
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [dragOverId, setDragOverId] = useState<string | null>(null);
+
+  // moveNode 是裸函数（每次渲染新引用）且闭包读 state.nodes。若直接进
+  // useCallback 的依赖数组，下面的回调每渲染都会换引用，击穿 TreeNode 的 memo。
+  // 用 ref 桥接后依赖数组可以恒为空。
+  const moveNodeRef = useRef(moveNode);
+  moveNodeRef.current = moveNode;
+
+  // 目标是否位于被拖节点的子树内（含自身）。moveNode 内部也有同样的
+  // 环检测，这里提前判断只是为了不给非法目标显示放置高亮。
+  const isDescendantOf = (ancestorId: string, targetId: string) => {
+    let current: string | undefined = targetId;
+    while (current) {
+      if (current === ancestorId) return true;
+      const parent = state.nodes.find(n => n.id === current);
+      if (!parent) return false;
+      current = parent.parent_id || undefined;
+    }
+    return false;
+  };
+
+  // 拖到请求行上时，落点回退为该请求所在的文件夹 —— 用户瞄准的是"这个位置"，
+  // 而不是"这个请求"。不这么做的话，拖到请求上完全没有任何反馈，看起来就像
+  // 拖拽功能坏了（树里请求行远多于文件夹行，这是最常撞上的情况）。
+  const resolveDropTarget = (target: ApiNode): string | null =>
+    target.node_type === "folder" ? target.id : (target.parent_id ?? null);
+
+  // 不能放回原父节点（无意义）；不能放进自己的子树。
+  // 同样读 state.nodes，所以和 moveNode 一样走 ref 桥接。
+  const canDrop = (dragged: ApiNode | null, target: ApiNode) => {
+    if (!dragged) return false;
+    const destId = resolveDropTarget(target);
+    if (dragged.id === destId) return false;
+    if ((dragged.parent_id ?? null) === destId) return false;
+    if (destId === null) return true;               // 落到顶层
+    return !isDescendantOf(dragged.id, destId);
+  };
+  const canDropRef = useRef(canDrop);
+  canDropRef.current = canDrop;
+  const resolveDropTargetRef = useRef(resolveDropTarget);
+  resolveDropTargetRef.current = resolveDropTarget;
+
+  const handleDragStart = useCallback((e: React.DragEvent, node: ApiNode) => {
+    e.stopPropagation();                            // 否则祖先行也会开始拖拽
+    dragNodeRef.current = node;
+    setDraggingId(node.id);
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", node.id);  // Firefox 不设 data 不触发拖拽
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent, node: ApiNode) => {
+    e.stopPropagation();
+    if (!canDropRef.current(dragNodeRef.current, node)) return; // 不 preventDefault ⇒ 不允许放置
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    // 高亮真正的落点：悬停在请求上时亮的是它的父文件夹，而不是那一行请求。
+    const destId = resolveDropTargetRef.current(node);
+    setDragOverId(prev => prev === destId ? prev : destId);
+  }, []);
+
+  const handleDragLeave = useCallback((_e: React.DragEvent, node: ApiNode) => {
+    // 只清自己：离开子行进入父行时，父行的 dragover 会紧接着改回来。
+    // 注意比的是解析后的落点 —— 悬停请求行时高亮挂在其父文件夹上。
+    const destId = resolveDropTargetRef.current(node);
+    setDragOverId(prev => prev === destId ? null : prev);
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent, node: ApiNode) => {
+    e.preventDefault();
+    e.stopPropagation();                            // 防止冒泡到根容器再移到顶层
+    const dragged = dragNodeRef.current;
+    if (canDropRef.current(dragged, node) && dragged) {
+      moveNodeRef.current(dragged, resolveDropTargetRef.current(node));
+    }
+    dragNodeRef.current = null;
+    setDraggingId(null);
+    setDragOverId(null);
+  }, []);
+
+  const handleDragEnd = useCallback(() => {
+    dragNodeRef.current = null;
+    setDraggingId(null);
+    setDragOverId(null);
+  }, []);
+
+  // 落在树的空白处 = 移动到顶层。
+  const handleRootDrop = useCallback((e: React.DragEvent) => {
+    if (e.target !== e.currentTarget) return;     // 实际落在某行上的，由行处理
+    e.preventDefault();
+    const dragged = dragNodeRef.current;
+    if (dragged && dragged.parent_id) moveNodeRef.current(dragged, null);
+    dragNodeRef.current = null;
+    setDraggingId(null);
+    setDragOverId(null);
+  }, []);
+
   // ── Request editing ──────────────────────────────────────────
 
   // Persist the currently-selected node to disk. Wrapped in a debounce so
@@ -1885,7 +2403,6 @@ export default function ApiApp() {
         path_vars: pathVarsWithValues,
         url_encoded: (req.url_encoded || []).filter(([k]) => k.trim()),
         form_data: (req.form_data || []).filter(f => f.key.trim()),
-        env_id: state.active_env_id,
       };
       const resp = await invoke<ApiResponse>("api_execute", { request: cleanReq });
       // A newer send superseded us — drop this reply entirely.
@@ -1915,7 +2432,7 @@ export default function ApiApp() {
       // slow earlier reply switches it off while a newer one is running.
       if (seq === sendSeq.current) setSending(false);
     }
-  }, [selectedNode, state.active_env_id, saveNode]);
+  }, [selectedNode, saveNode]);
 
   // ── Environment operations ───────────────────────────────────
   //
@@ -1969,7 +2486,9 @@ export default function ApiApp() {
       confirmText: "创建",
       onConfirm: (name) => {
         setInputModal(null);
-        const env: ApiEnvironment = { id: uid(), name, vars: [["", ""]] };
+        const env: ApiEnvironment = {
+          id: uid(), name, base_url: "", headers: [["", ""]], vars: [["", ""]],
+        };
         // New envs need the backend-assigned id, so we still do a
         // single round-trip here — but the local state is updated
         // optimistically so the sidebar shows the new env immediately.
@@ -1996,47 +2515,67 @@ export default function ApiApp() {
         // the sidebar that the next reload will reconcile, which is
         // strictly better than leaving the env visible while a slow
         // disk drive makes the user wonder if the click registered.
+        //
+        // Requests bound to this env keep their now-dangling `env_id`.
+        // Rewriting every referencing node would mean a save storm here,
+        // and the id is harmless: both the backend (`env_snapshot`) and
+        // the picker below resolve an unknown id to "no env". Undoing a
+        // failed delete then restores those bindings for free.
         setState(prev => ({
           ...prev,
           envs: prev.envs.filter(e => e.id !== env.id),
-          active_env_id: prev.active_env_id === env.id ? null : prev.active_env_id,
         }));
         invoke("api_delete_env", { id: env.id }).catch(e => {
           showToast(`删除环境失败: ${friendlyError(e)}`, "error");
           setState(prev => ({
             ...prev,
             envs: [...prev.envs, env],
-            active_env_id: prev.active_env_id === env.id ? env.id : prev.active_env_id,
           }));
         });
       },
     });
   };
 
-  const setActiveEnv = (envId: string | null) => {
-    // Click event, not a keystroke — synchronous setState followed by a
-    // fire-and-forget IPC is fine here. We could be paranoid and roll
-    // back on failure, but the user can just click the env again.
-    setState(prev => ({ ...prev, active_env_id: envId }));
-    invoke("api_set_active_env", { envId }).catch(e => {
-      showToast(`切换环境失败: ${friendlyError(e)}`, "error");
-    });
-  };
-
   // ── Render ───────────────────────────────────────────────────
+  //
+  // NOTE: everything hook-shaped must stay ABOVE the `loading` early
+  // return. `inheritedHeaders` originally sat down with the other
+  // derived counts and silently changed the hook count between the
+  // loading and loaded renders ("change in the order of Hooks").
+
+  const req = selectedNode?.request || null;
+  // Headers inherited from the request's environment. Mirrors the backend's
+  // `merge_env_headers`: a same-named request header (case-insensitive) wins,
+  // so it is no longer inherited — whether it overrides or opts out entirely.
+  const inheritedHeaders = useMemo(() => {
+    const env = req?.env_id ? state.envs.find(e => e.id === req.env_id) : undefined;
+    if (!env) return [] as [string, string][];
+    const own = new Set(
+      (req?.headers ?? [])
+        .filter(([k]) => k.trim())
+        .map(([k]) => k.trim().toLowerCase())
+    );
+    return (env.headers ?? []).filter(
+      ([k]) => k.trim() && !own.has(k.trim().toLowerCase())
+    );
+  }, [state.envs, req?.env_id, req?.headers]);
 
   if (loading) {
     return <div className="api-app"><div className="api-placeholder"><div className="api-spinner" /></div></div>;
   }
 
-  const req = selectedNode?.request || null;
-  const headerCount = req?.headers?.filter(([k]) => k.trim()).length || 0;
+  const ownHeaderCount = req?.headers?.filter(([k]) => k.trim()).length || 0;
+  const headerCount = ownHeaderCount + inheritedHeaders.length;
   const queryCount = req?.query?.filter(([k]) => k.trim()).length || 0;
   const pathCount = req?.path_vars?.filter(([k]) => k.trim()).length || 0;
   const hasBody = req?.body_type && req.body_type !== "none";
 
   return (
-    <div className="api-app">
+    <div
+      className="api-app"
+      ref={split.containerRef}
+      style={{ ["--api-split-top" as string]: `${split.topPct}%` }}
+    >
       {/* ── Sidebar ── */}
       <div className="api-sidebar">
         {/* Collections */}
@@ -2044,88 +2583,53 @@ export default function ApiApp() {
           <div className="api-sidebar-header">
             <span className="api-sidebar-title">请求集合</span>
             <div className="api-sidebar-actions">
-              <button className="api-icon-btn" onClick={() => addFolder(null)} title="新建文件夹">📁+</button>
+              <button className="api-icon-btn" onClick={() => addFolder(null)} title="新建文件夹"><IconFolder />+</button>
               <button className="api-icon-btn" onClick={() => addRequest(null)} title="新建请求">+</button>
             </div>
           </div>
-          <div className="api-tree">
-            {state.nodes.filter(n => n.parent_id === null).length === 0 ? (
+          {/*
+            Only claim the drop when it lands on the container's own padding —
+            i.e. "move to top level". An unconditional preventDefault() here
+            would fire *after* each row's handler (React delegates at the root,
+            so a row's stopPropagation cannot stop it) and re-enable dropping on
+            rows the row itself just refused, killing every drop-target
+            highlight and stealing real drops away to the top level.
+          */}
+          <div
+            className="api-tree"
+            onDragOver={e => { if (e.target === e.currentTarget) e.preventDefault(); }}
+            onDrop={handleRootDrop}
+          >
+            {roots.length === 0 ? (
               <div className="api-empty">
                 暂无请求集合。
                 <br />
                 点击 + 创建一个请求。
               </div>
             ) : (
-              state.nodes
-                .filter(n => n.parent_id === null)
-                .map(node => (
-                  <TreeNode
-                    key={node.id}
-                    node={node}
-                    nodes={state.nodes}
-                    selectedId={selectedId}
-                    collapsedIds={collapsedIds}
-                    onSelect={setSelectedId}
-                    onToggle={id => setCollapsedIds(prev => {
-                      const next = new Set(prev);
-                      next.has(id) ? next.delete(id) : next.add(id);
-                      return next;
-                    })}
-                    onRename={startRename}
-                    onDelete={confirmDeleteNode}
-                    onDuplicate={duplicateNode}
-                    onContextMenu={showContextMenu}
-                  />
-                ))
-            )}
-          </div>
-        </div>
-
-        {/* Environments */}
-        <div className="api-sidebar-section">
-          <div className="api-sidebar-header">
-            <span className="api-sidebar-title">环境变量</span>
-            <div className="api-sidebar-actions">
-              <button className="api-icon-btn" onClick={addEnv} title="新建环境">+</button>
-            </div>
-          </div>
-          <div className="api-envs">
-            {state.envs.length === 0 ? (
-              <div className="api-empty">暂无环境。</div>
-            ) : (
-              state.envs.map(env => {
-                const isActive = state.active_env_id === env.id;
-                return (
-                  <div key={env.id} className={`api-env-block${isActive ? " active" : ""}`}>
-                    <div className="api-env-row" onClick={() => setActiveEnv(isActive ? null : env.id)}>
-                      <span style={{ flex: 1 }}>{isActive ? "✓" : "○"} {env.name}</span>
-                      <button className="api-mini-btn" onClick={e => { e.stopPropagation(); deleteEnv(env); }}>×</button>
-                    </div>
-                    {isActive && (
-                      <div className="api-env-vars">
-                        {env.vars.map(([k, v], i) => (
-                          <EnvVarRow
-                            key={i}
-                            k={k}
-                            v={v}
-                            onChange={next => {
-                              const arr = env.vars.map((p, idx) => idx === i ? next : p);
-                              updateEnv({ ...env, vars: arr });
-                            }}
-                            onRemove={() => {
-                              const next = env.vars.filter((_, idx) => idx !== i);
-                              updateEnv({ ...env, vars: next.length > 0 ? next : [["", ""]] });
-                            }}
-                          />
-                        ))}
-                        <button className="api-env-add-btn" onClick={() => updateEnv({ ...env, vars: [...env.vars, ["", ""]] })}>
-                          + 添加变量
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                );
-              })
+              roots.map(node => (
+                <TreeNode
+                  key={node.id}
+                  node={node}
+                  childrenMap={childrenMap}
+                  selectedId={selectedId}
+                  collapsedIds={collapsedIds}
+                  depth={0}
+                  onSelect={setSelectedId}
+                  onToggle={toggleCollapsed}
+                  onRename={startRename}
+                  onDelete={confirmDeleteNode}
+                  onDuplicate={duplicateNode}
+                  onContextMenu={showContextMenu}
+                  draggingId={draggingId}
+                  dragOverId={dragOverId}
+                  onDragStart={handleDragStart}
+                  onDragOver={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  onDrop={handleDrop}
+                  onDragEnd={handleDragEnd}
+                />
+              ))
             )}
           </div>
         </div>
@@ -2139,6 +2643,18 @@ export default function ApiApp() {
                 {selectedNode?.name}
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>
               </div>
+              <button
+                className="api-editor-env-btn"
+                onClick={() => setEnvModalOpen(true)}
+                title="管理环境变量"
+              >
+                {req.env_id
+                  ? state.envs.find(e => e.id === req.env_id)?.name ?? "环境"
+                  : "环境变量"}
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ width: 12, height: 12 }}>
+                  <path d="M6 3l4 5-4 5" />
+                </svg>
+              </button>
             </div>
 
             <div className="api-url-bar">
@@ -2149,6 +2665,17 @@ export default function ApiApp() {
               >
                 {METHODS.map(m => <option key={m} value={m}>{m}</option>)}
               </select>
+              {state.envs.length > 0 && (
+                <select
+                  className="api-env-select"
+                  value={req.env_id ?? ""}
+                  onChange={e => updateRequest({ env_id: e.target.value || null })}
+                  title="本请求使用的环境"
+                >
+                  <option value="">无环境</option>
+                  {state.envs.map(env => <option key={env.id} value={env.id}>{envSelectLabel(env)}</option>)}
+                </select>
+              )}
               <UrlInput
                 value={req.url}
                 onCommit={url => updateRequest({ url })}
@@ -2158,12 +2685,6 @@ export default function ApiApp() {
                 {sending ? "发送中..." : "发送"}
               </button>
             </div>
-
-            {activeEnv && (
-              <div className="api-env-banner">
-                当前环境：<strong>{activeEnv.name}</strong> — 正在使用 <code>{activeEnv.vars.filter(([k]) => k).length}</code> 个变量
-              </div>
-            )}
 
             <div className="api-tabs">
               <button className={`api-tab${activeTab === "headers" ? " active" : ""}`} onClick={() => setActiveTab("headers")}>
@@ -2185,12 +2706,31 @@ export default function ApiApp() {
 
             <div className="api-tab-content">
               {activeTab === "headers" && (
-                <KvEditor
-                  pairs={req.headers?.length ? req.headers : [["", ""]]}
-                  onChange={headers => updateRequest({ headers })}
-                  keyPlaceholder="请求头名称"
-                  valuePlaceholder="值"
-                />
+                <>
+                  {/* Read-only preview of what the active env contributes, so
+                      the request that goes out is never a surprise. Editing
+                      happens in the env dialog; overriding happens by adding a
+                      same-named row below. */}
+                  {inheritedHeaders.length > 0 && (
+                    <div className="api-inherited-headers">
+                      <div className="api-inherited-title">
+                        来自环境「{state.envs.find(e => e.id === req.env_id)?.name}」
+                      </div>
+                      {inheritedHeaders.map(([k, v], i) => (
+                        <div className="api-inherited-row" key={i}>
+                          <span className="api-inherited-k">{k}</span>
+                          <span className="api-inherited-v" title={v}>{v}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <KvEditor
+                    pairs={req.headers?.length ? req.headers : [["", ""]]}
+                    onChange={headers => updateRequest({ headers })}
+                    keyPlaceholder="请求头名称"
+                    valuePlaceholder="值"
+                  />
+                </>
               )}
               {activeTab === "query" && (
                 <KvEditor
@@ -2302,6 +2842,25 @@ export default function ApiApp() {
         )}
       </div>
 
+      {/* ── Splitter: drag to rebalance editor vs response ── */}
+      <div
+        className="api-splitter"
+        data-dragging={split.dragging}
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="调整请求区与响应区高度"
+        aria-valuenow={Math.round(split.topPct)}
+        aria-valuemin={15}
+        aria-valuemax={85}
+        tabIndex={0}
+        title="拖拽调整高度（双击恢复默认）"
+        onMouseDown={split.onHandleMouseDown}
+        onKeyDown={split.onHandleKeyDown}
+        onDoubleClick={split.reset}
+      >
+        <div className="api-splitter-grip" />
+      </div>
+
       {/* ── Response (right) ── */}
       <div className="api-response">
         <ResponseViewer response={response} loading={sending} error={sendError} />
@@ -2310,6 +2869,19 @@ export default function ApiApp() {
       {/* ── Modals ── */}
       {toast && (
         <div className={`toast toast-${toast.type}`}>{toast.msg}</div>
+      )}
+
+      {/* Rendered before the generic modals on purpose: `addEnv` / `deleteEnv`
+          open InputModal / ConfirmModal on top of this one, and since all
+          overlays share z-index 9999, paint order decides who wins. */}
+      {envModalOpen && (
+        <EnvManagerModal
+          envs={state.envs}
+          onAdd={addEnv}
+          onUpdate={updateEnv}
+          onDelete={deleteEnv}
+          onClose={() => setEnvModalOpen(false)}
+        />
       )}
 
       {inputModal && (

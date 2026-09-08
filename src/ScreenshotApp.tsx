@@ -959,8 +959,8 @@ export default function ScreenshotApp() {
   // The pinned window is positioned near the original selection (offset a little)
   // so it feels anchored to what the user grabbed.
   const enterPinnedMode = async (dataUrl: string) => {
-    const w = region ? Math.round(region.w) : (imgRef.current?.width ?? 400);
-    const h = region ? Math.round(region.h) : (imgRef.current?.height ?? 300);
+    const w = region ? Math.round(region.w / (window.devicePixelRatio || 1)) : Math.round((imgRef.current?.width ?? 400) / (window.devicePixelRatio || 1));
+    const h = region ? Math.round(region.h / (window.devicePixelRatio || 1)) : Math.round((imgRef.current?.height ?? 300) / (window.devicePixelRatio || 1));
     setPinnedShot({ url: dataUrl, w, h });
     const win = getCurrentWindow();
     try {
@@ -971,7 +971,7 @@ export default function ScreenshotApp() {
       // region coords are image-space ≈ screen-space for the primary monitor).
       if (region) {
         try {
-          await win.setPosition(new LogicalPosition(Math.round(region.x), Math.round(region.y)));
+          await win.setPosition(new LogicalPosition(Math.round(region.x / (window.devicePixelRatio || 1)), Math.round(region.y / (window.devicePixelRatio || 1))));
         } catch { /* keep default position */ }
       }
     } catch { /* best-effort */ }
@@ -1082,6 +1082,16 @@ export default function ScreenshotApp() {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const mod = e.ctrlKey || e.metaKey;
+      // Pinned ("贴图") mode renders only the floating window — the overlay,
+      // its toolbar and every annotation gesture are gone. Firing Ctrl+S/C/D or
+      // the tool hotkeys here would act on a canvas the user can no longer see
+      // (and Ctrl+D would re-pin an already-pinned shot). Esc is the one key
+      // that still means something: close the floating window.
+      if (pinnedShot) {
+        if (e.key === "Escape") { e.preventDefault(); exitPinnedMode(); }
+        return;
+      }
+
 
       // Never let global shortcuts act on keystrokes aimed at a text field, no
       // matter what this closure believes `textInput` to be. The editor stops its
@@ -1138,7 +1148,7 @@ export default function ScreenshotApp() {
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [textInput, texts, pens, arrows, rects, mosaics, phase, region, pinned, selectedTextId]);
+  }, [textInput, texts, pens, arrows, rects, mosaics, phase, region, pinned, selectedTextId, pinnedShot]);
 
   // Preview shape while dragging (image-space). Mosaic shares the rect preview
   // outline so the user can see the area being censored before release.
@@ -1225,8 +1235,8 @@ export default function ScreenshotApp() {
     return (
       <div className="sc-pin-window">
         <div className="sc-pin-bar" data-tauri-drag-region>
-          <span className="sc-pin-title">📌 对比</span>
-          <button className="sc-pin-close" onClick={exitPinnedMode} title="关闭">✕</button>
+          <span className="sc-pin-title"><IconPin /> 对比</span>
+          <button className="sc-pin-close" onClick={exitPinnedMode} title="关闭"><IconClose /></button>
         </div>
         <img className="sc-pin-img" src={pinnedShot.url} alt="pinned screenshot" draggable={false} />
       </div>

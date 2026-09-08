@@ -177,6 +177,104 @@ export const IconCopy: React.FC<IconProps> = (p) => (
   </Svg>
 );
 
+/* ── Tools window / tree icons ─────────────────────────────────── */
+
+export const IconClock: React.FC<IconProps> = (p) => (
+  <Svg {...p} size={14}>
+    <circle cx="8" cy="8" r="6" />
+    <path d="M8 4.5V8l2.5 1.5" />
+  </Svg>
+);
+
+export const IconGlobe: React.FC<IconProps> = (p) => (
+  <Svg {...p} size={14}>
+    <circle cx="8" cy="8" r="6" />
+    <path d="M2 8h12" />
+    <path d="M8 2c2.2 1.7 2.2 10.3 0 12M8 2c-2.2 1.7-2.2 10.3 0 12" />
+  </Svg>
+);
+
+export const IconShuffle: React.FC<IconProps> = (p) => (
+  <Svg {...p} size={14}>
+    <path d="M2 4h2.5l7 8H14M2 12h2.5l7-8H14" />
+    <path d="M12 2l2 2-2 2M12 10l2 2-2 2" />
+  </Svg>
+);
+
+export const IconPuzzle: React.FC<IconProps> = (p) => (
+  <Svg {...p} size={14}>
+    <path d="M6 2.5a1.5 1.5 0 013 0V4h3v3h1.5a1.5 1.5 0 010 3H12v3H9v-1.5a1.5 1.5 0 00-3 0V13H3V4h3z" />
+  </Svg>
+);
+
+/* 折叠三角：默认指右，展开态由 CSS 旋转 90° 指下（见 .jv-caret.open）。
+ * 尺寸取 10 是为了塞进 12px 宽的 caret 槽位，描边相应加粗才看得清。 */
+export const IconChevron: React.FC<IconProps> = (p) => (
+  <Svg {...p} size={10} strokeWidth={1.8}>
+    <path d="M6 3l4 5-4 5" />
+  </Svg>
+);
+
+export const IconCheck: React.FC<IconProps> = (p) => (
+  <Svg {...p} size={14} strokeWidth={1.6}>
+    <path d="M3 8.5l3.5 3.5L13 4.5" />
+  </Svg>
+);
+
+export const IconFolder: React.FC<IconProps> = (p) => (
+  <Svg {...p} size={14}>
+    <path d="M2 4.5a1 1 0 011-1h3.2l1.3 1.6H13a1 1 0 011 1v5.4a1 1 0 01-1 1H3a1 1 0 01-1-1z" />
+  </Svg>
+);
+
+export const IconHome: React.FC<IconProps> = (p) => (
+  <Svg {...p} size={14}>
+    <path d="M2.5 7.2L8 2.8l5.5 4.4" />
+    <path d="M4 8.2v4.6a.6.6 0 00.6.6h6.8a.6.6 0 00.6-.6V8.2" />
+  </Svg>
+);
+
+export const IconLock: React.FC<IconProps> = (p) => (
+  <Svg {...p} size={14}>
+    <rect x="3.5" y="7" width="9" height="6" rx="1" />
+    <path d="M5.8 7V5.2a2.2 2.2 0 014.4 0V7" />
+  </Svg>
+);
+
+export const IconPin: React.FC<IconProps> = (p) => (
+  <Svg {...p} size={14}>
+    <path d="M6 2h4l-.6 3.4 2.1 2.1H4.5l2.1-2.1z" />
+    <path d="M8 7.5V14" />
+  </Svg>
+);
+
+export const IconLink: React.FC<IconProps> = (p) => (
+  <Svg {...p} size={14}>
+    <path d="M6.8 9.2a2.6 2.6 0 003.9.3l1.8-1.8a2.6 2.6 0 00-3.7-3.7l-1 1" />
+    <path d="M9.2 6.8a2.6 2.6 0 00-3.9-.3L3.5 8.3a2.6 2.6 0 003.7 3.7l1-1" />
+  </Svg>
+);
+
+export const IconNote: React.FC<IconProps> = (p) => (
+  <Svg {...p} size={14}>
+    <path d="M9 2.5H4a1 1 0 00-1 1v9a1 1 0 001 1h8a1 1 0 001-1V6.5z" />
+    <path d="M9 2.5v4h4" />
+  </Svg>
+);
+
+export const IconWrench: React.FC<IconProps> = (p) => (
+  <Svg {...p} size={14}>
+    <path d="M10.4 2.4a3.6 3.6 0 00-4.2 4.9L2.6 10.9a1.2 1.2 0 001.7 1.7l3.6-3.6a3.6 3.6 0 004.9-4.2l-2 2-1.9-.5-.5-1.9z" />
+  </Svg>
+);
+
+export const IconCamera: React.FC<IconProps> = (p) => (
+  <Svg {...p} size={14}>
+    <path d="M2.5 5.8h2.2l1-1.6h4.6l1 1.6h2.2a.8.8 0 01.8.8v5.4a.8.8 0 01-.8.8h-11a.8.8 0 01-.8-.8V6.6a.8.8 0 01.8-.8z" />
+    <circle cx="8" cy="9.3" r="2.2" />
+  </Svg>
+);
+
 /* ── Type helper for item-type badges ─────────────────────────── */
 
 import type { ClipboardItem } from "../hooks/useClipboard";

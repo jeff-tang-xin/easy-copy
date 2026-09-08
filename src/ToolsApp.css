@@ -34,7 +34,7 @@
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all var(--dur) var(--ease);
   position: relative;
 }
 
@@ -60,7 +60,10 @@
 }
 
 .tools-tab-icon {
-  font-size: 15px;
+  /* 图标从 emoji 换成 SVG 后，font-size 不再有意义；inline 的 <svg> 会坐在基线上
+   * 带出行高抖动，改用 flex 让它与文字垂直居中。 */
+  display: flex;
+  align-items: center;
 }
 
 /* ===== Content ===== */
@@ -118,11 +121,11 @@
   font-size: 13px;
   font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background-color: var(--bg-primary);
   color: var(--text-primary);
   outline: none;
-  transition: all 0.15s ease;
+  transition: all var(--dur) var(--ease);
   box-sizing: border-box;
 }
 
@@ -141,12 +144,12 @@
   font-size: 13px;
   font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background-color: var(--bg-primary);
   color: var(--text-primary);
   resize: vertical;
   outline: none;
-  transition: all 0.15s ease;
+  transition: all var(--dur) var(--ease);
   box-sizing: border-box;
   line-height: 1.5;
 }
@@ -170,8 +173,8 @@
   gap: 10px;
   padding: 7px 12px;
   background-color: var(--bg-tertiary);
-  border-radius: 6px;
-  transition: background-color 0.12s ease;
+  border-radius: var(--radius-sm);
+  transition: background-color var(--dur-fast) var(--ease);
 }
 
 .tools-output-row:hover {
@@ -213,7 +216,7 @@
   color: var(--text-secondary);
   cursor: pointer;
   flex-shrink: 0;
-  transition: all 0.12s ease;
+  transition: all var(--dur-fast) var(--ease);
   font-weight: 500;
 }
 
@@ -233,7 +236,7 @@
   margin-top: 8px;
   padding: 6px 10px;
   background-color: var(--danger-bg);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
 }
 
 /* Toast (shared look with App.css `.toast` 鈥?tools window has its own copy
@@ -245,7 +248,7 @@
   left: 50%;
   transform: translateX(-50%);
   padding: 8px 18px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   font-size: 13px;
   font-weight: 500;
   z-index: 9999;
@@ -254,7 +257,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   animation: tools-toast-slide-in 0.2s ease;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--shadow-md);
   pointer-events: none;
 }
 
@@ -302,7 +305,7 @@
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all var(--dur) var(--ease);
   white-space: nowrap;
 }
 
@@ -325,11 +328,11 @@
   font-size: 11px;
   font-weight: 600;
   border: 1px solid var(--border-color);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all var(--dur) var(--ease);
 }
 
 .cron-mode-btn:hover {
@@ -375,14 +378,14 @@
   font-weight: 500;
   padding: 10px 14px;
   background-color: var(--bg-tertiary);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   margin-bottom: 8px;
 }
 
 .cron-expression {
   padding: 7px 12px;
   background-color: var(--bg-tertiary);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
 }
 
 /* ===== Regex ===== */
@@ -424,8 +427,8 @@
 .regex-match-item {
   padding: 8px 12px;
   background-color: var(--bg-tertiary);
-  border-radius: 6px;
-  transition: background-color 0.12s ease;
+  border-radius: var(--radius-sm);
+  transition: background-color var(--dur-fast) var(--ease);
 }
 
 .regex-match-item:hover {
@@ -450,7 +453,7 @@
   font-size: 11px;
   padding: 2px 8px;
   background-color: var(--bg-primary);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   color: var(--green);
 }
 
@@ -461,7 +464,7 @@
   padding: 12px 14px;
   background-color: var(--bg-tertiary);
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   white-space: pre-wrap;
   word-break: break-all;
   overflow-x: auto;
@@ -497,12 +500,20 @@
   align-items: center;
   gap: 8px;
   padding: 6px 8px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   border: 1px solid transparent;
   font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
   font-size: 12px;
-  transition: background-color 0.12s ease, border-color 0.12s ease;
+  transition: background-color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+  /* 后端已把日志封顶 500 条（proxy.rs），但滚动容器只露出 ~8 行，其余仍要布局+绘制。
+   * content-visibility: auto 让视口外的行跳过渲染工作。
+   * contain-intrinsic-size 必须用 `auto <len>` 双值：auto 让浏览器记住这一行
+   * 真实测量过的高度，32px 只是首次渲染前的占位估值，避免滚动条长度跳动。
+   * 注意 content-visibility: auto 隐含 contain: paint，会裁掉溢出内容 —— 本行内
+   * 全是常规流式 span，没有绝对定位的浮层，所以安全。 */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 32px;
 }
 
 .req-log-row:hover {
@@ -525,7 +536,7 @@
 .req-log-route {
   font-size: 10px;
   padding: 1px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background-color: var(--bg-tertiary);
   color: var(--text-secondary);
   white-space: nowrap;
@@ -544,7 +555,7 @@
   font-weight: 700;
   font-size: 11px;
   padding: 1px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 
 .log-status.ok {
@@ -619,13 +630,13 @@
 .log-modal {
   background-color: var(--bg-secondary);
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   width: min(780px, 92vw);
   max-height: 84vh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--shadow-lg);
 }
 
 .log-modal-head {
@@ -732,7 +743,7 @@
 /* Header key/value table. */
 .hdr-table {
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   overflow: hidden;
 }
 
@@ -803,7 +814,7 @@
 .log-error-banner {
   background-color: var(--danger-bg);
   border: 1px solid var(--red);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 8px 10px;
   font-size: 12px;
   margin-bottom: 12px;
@@ -824,7 +835,7 @@
 .proc-switch {
   display: inline-flex;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   overflow: hidden;
   flex-shrink: 0;
 }
@@ -836,7 +847,7 @@
   background-color: var(--bg-primary);
   color: var(--text-secondary);
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all var(--dur) var(--ease);
 }
 
 .proc-switch-btn:not(:last-child) {
@@ -871,7 +882,7 @@
   max-height: 420px;
   overflow-y: auto;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
 }
 
 .proc-table {
@@ -940,3 +951,194 @@
 .proc-danger:hover {
   background-color: var(--danger-bg) !important;
 }
+
+/* ===== Focus Ring（统一键盘焦点提示） =====
+   与 App.css 同一套规则：只用既有 --ring token，用 :focus-visible 而非
+   :focus 以免鼠标点击也弹环。已有自定义 focus 样式的选择器特异性更高，
+   不会被这里覆盖成双环。 */
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+[tabindex]:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+/* ===== ProxyTab 新增样式 ===== */
+
+/* 启动失败醒目错误条 */
+.proxy-start-error {
+  background: var(--danger-bg);
+  border: 1px solid var(--red);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  margin-top: 8px;
+  font-size: 13px;
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+
+/* 日志筛选栏容器 */
+.proxy-log-filter {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+/* 筛选下拉框 */
+.proxy-filter-select {
+  padding: 4px 8px;
+  background: var(--bg-primary);
+  color: inherit;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-xs);
+  font-size: 13px;
+  font-family: inherit;
+}
+
+/* ===== ProcessTab 新增样式 ===== */
+
+/* 可排序表头 */
+.proc-sortable {
+  cursor: pointer;
+  user-select: none;
+}
+.proc-sortable:hover {
+  background: var(--bg-hover);
+}
+.proc-sortable::after {
+  content: " ↕";
+  opacity: 0.3;
+  font-size: 11px;
+}
+.proc-sortable.proc-sort-asc::after {
+  content: " ↑";
+  opacity: 1;
+}
+.proc-sortable.proc-sort-desc::after {
+  content: " ↓";
+  opacity: 1;
+}
+
+/* 端口状态着色 */
+.proc-state-ok {
+  color: var(--green);
+  font-weight: 500;
+}
+.proc-state-warn {
+  color: #e6b800;
+}
+.proc-state-err {
+  color: var(--red);
+}
+
+/* 小号操作按钮 */
+.proc-action-btn {
+  padding: 1px 6px;
+  font-size: 12px;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  color: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.proc-action-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+}
+
+/* 进程聚合组头 */
+.proc-group-header {
+  font-weight: 600;
+  background: var(--bg-tertiary);
+  padding: 4px 8px;
+  font-size: 13px;
+  margin-top: 4px;
+  border-radius: 3px;
+}
+
+/* 进程名单元格（截断） */
+.proc-name-cell {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 自动刷新行 */
+.proc-auto-refresh {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+.proc-auto-refresh label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.proc-auto-refresh select {
+  padding: 2px 6px;
+  background: var(--bg-primary);
+  color: inherit;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+/* 批量操作栏 */
+.proc-batch-bar {
+  position: sticky;
+  bottom: 0;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border-color);
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  z-index: 10;
+}
+.proc-batch-bar .copy-btn {
+  font-size: 12px;
+  padding: 3px 10px;
+}
+
+/* ===== 通用工具按钮（修复已知缺失） ===== */
+
+.tools-btn {
+  padding: 6px 16px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  font-size: 13px;
+}
+.tools-btn:hover {
+  opacity: 0.9;
+}
+.tools-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ===== IP 查询行布局（修复已知缺失） ===== */
+
+.ip-query-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.ip-query-row .tools-input {
+  flex: 1;
+  min-width: 120px;
+}
+
