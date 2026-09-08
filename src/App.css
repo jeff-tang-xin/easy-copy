@@ -1,7 +1,11 @@
 :root {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", Roboto, sans-serif;
   font-size: 13px;
-  line-height: 1.5;
+  /* 排版韵律：正文行高。全库 210 处 font-size 只配了 30 处 line-height，
+     其余 86% 此前靠继承这一处取值。1.5 偏紧（尤其中文字面率高、方块字更需
+     行间空隙），提到 1.6 落进「正文 1.6~1.8」区间的下沿 —— 取下沿是因为
+     主窗口仅 600px 高，再松会显著减少首屏可见条目数。 */
+  line-height: var(--lh-body);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 
@@ -20,12 +24,64 @@
 
   /* A single easing for everything. Mixed `ease`/`linear`/default curves
    * across a screen make motion feel uncoordinated. */
-  --ease: cubic-bezier(0.4, 0, 0.2, 1);
-  --dur-fast: 0.12s;
-  --dur: 0.18s;
+  /* 微交互缓动。旧值 cubic-bezier(0.4, 0, 0.2, 1) 是 Material 的 standard
+     曲线，本质是 ease-in-out：起手带一段加速。用在 hover 上会让「指针已经
+     压到按钮、颜色却还没开始变」，这正是界面显得迟滞的来源。
+     换成 ease-out 系的 (0.16, 1, 0.3, 1)：0 时刻即达最高速率，末端平滑收住
+     —— 反馈必须立刻发生，收尾才需要柔化。
+     --ease-out-back 仅供「元素入场」使用（toast / dialog），末端 1.02 的
+     轻微过冲让它有「落位」感；明确不用于 hover，反复触发的交互加回弹会晕。 */
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-out-back: cubic-bezier(0.34, 1.15, 0.64, 1);
+  /* ↑ 明确不用在 hover 上。保留在这里仅为未来需要时参考，不要主动使用；
+     用户指定「禁止弹跳（bounce）」，任何入口动画都不该有回弹感。 */
+  /* 时长。旧值 0.12s/0.18s 偏快，动效几乎察觉不到就结束了，等于没做。
+     提到 0.16s/0.22s，主档落进 hover 反馈的 0.2~0.3s 区间下沿。
+     取下沿而非 0.3s：这是高频操作的桌面工具（复制/粘贴/切换每天数百次），
+     动效再长就从「反馈」变成「等待」。 */
+  --dur-fast: 0.16s;
+  --dur: 0.22s;
+  --dur-slow: 0.3s;
 
   --font-mono: "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas,
     "Courier New", monospace;
+
+  /* Type scale. 205 font-size declarations across the app previously drew
+   * from 10 ad-hoc values (9/10/11/12/12.5/13/14/15/16/20px). Collapsing
+   * them onto five steps is what makes a UI read as designed rather than
+   * accreted. Like radius above, size doesn't vary by theme. */
+  --fs-xs: 11px;  /* timestamps, meta, hints */
+  --fs-sm: 12px;  /* secondary body, badges */
+  --fs-md: 13px;  /* body baseline — matches :root font-size */
+  --fs-lg: 15px;  /* dialog titles */
+  --fs-xl: 20px;  /* empty-state headings */
+
+  /* 行高阶。此前全库只有 6 个散值（1 / 1.3 / 1.4 / 1.5 / 1.6 / 1.7），且
+     86% 的文字根本没声明行高。三档覆盖全部真实用途：
+       --lh-tight  标题、单行控件标签 —— 落在「标题 1.2~1.3」区间
+       --lh-body   正文、多行内容 —— 落在「正文 1.6~1.8」下沿
+       --lh-flat   徽章 / 图标按钮，必须等于 1 才能让盒子精确贴合字形 */
+  --lh-tight: 1.3;
+  --lh-body: 1.6;
+  --lh-flat: 1;
+
+  /* 间距阶（8px 基准网格）。全库 571 处 padding/margin/gap 此前只有 24.3%
+     落在 8 的倍数上，散布于 1/2/3/4/5/6/7/9/10/12/13/14/18/20px 等 14 个
+     随手值 —— 没有系统，只有累积。
+     刻意保留 --sp-1 (4px) 这个半档：其中 149 处用的是 4/12/20px，本就落在
+     4px 子网格上。主窗口宽仅 420px、高 600px，是信息密集的桌面工具而非
+     着陆页；把 4px 全部推到 8px 会让每张卡片长高 4~8px，首屏直接少显示
+     1~2 条记录。以 8px 为主、4px 为半档，是密集 UI 的通行取法。 */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+
+  /* Sits between "no shadow" and --shadow-sm. That gap is why a dozen call
+   * sites hand-rolled their own faint shadows. */
+  --shadow-xs: 0 1px 1px rgba(0, 0, 0, 0.04);
 }
 
 html[data-theme="dark"] {
@@ -34,10 +90,18 @@ html[data-theme="dark"] {
   --bg-tertiary: #1f2335;
   --bg-hover: #292e42;
   --bg-active: #363b54;
-  --border-color: #2f334d;
+  /* Half-transparent rather than solid #2f334d: a fixed border colour reads
+   * as a hard seam when the surfaces it separates differ in lightness. */
+  --border-color: rgba(192, 202, 245, 0.09);
+  --border-subtle: rgba(192, 202, 245, 0.05);
   --text-primary: #c0caf5;
   --text-secondary: #a9b1d6;
-  --text-muted: #565f89;
+  /* WCAG 2.1 AA。旧值 #565f89 对 --bg-primary 仅 2.91:1，远低于正文所需的
+     4.5:1 —— 而这个令牌是全库最高频的文字色（70 处 `color:` 引用），时间戳、
+     元信息、占位符全靠它，是无障碍上最严重的单点。提亮到 #8f95b1 后对
+     primary/tertiary/hover 三种承载面分别为 6.08 / 5.26 / 4.54，全部达标；
+     色相未动，仍是同一支蓝灰。 */
+  --text-muted: #8f95b1;
   --accent: #7aa2f7;
   --accent-hover: #89b4ff;
   --accent-dim: rgba(122, 162, 247, 0.12);
@@ -58,7 +122,7 @@ html[data-theme="dark"] {
   /* Elevation. Dark themes can't lean on grey drop-shadows — they vanish
    * against a dark canvas — so depth comes from a near-black shadow plus a
    * 1px top highlight that reads as a lit edge. */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(0, 0, 0, 0.15);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
   --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.5);
   --inset-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.04);
@@ -80,22 +144,40 @@ html[data-theme="dark"] {
 }
 
 html[data-theme="light"] {
-  --bg-primary: #f5f5f5;
+  /* Pure #f5f5f5 grey reads as a 2010-era control panel. Lifting the canvas
+   * to near-white with a faint blue cast is most of what separates a modern
+   * light theme from a dated one. */
+  --bg-primary: #fbfbfd;
   --bg-secondary: #ffffff;
-  --bg-tertiary: #eceef2;
-  --bg-hover: #e2e6ee;
-  --bg-active: #d4dae6;
-  --border-color: #d0d5e0;
+  --bg-tertiary: #f2f3f7;
+  --bg-hover: #ebedf3;
+  --bg-active: #e1e4ec;
+  /* The single highest-impact token here. A solid mid-grey border repeated
+   * across ~140 `1px solid` call sites was the dominant source of the dated
+   * look. Half-transparent ink adapts to whatever sits beneath it, so
+   * stacked surfaces stop fighting each other. */
+  --border-color: rgba(44, 47, 58, 0.1);
+  /* One step fainter than --border-color: for dividers and internal grids,
+   * which shouldn't carry the same weight as a control outline. */
+  --border-subtle: rgba(44, 47, 58, 0.06);
   --text-primary: #2c2f3a;
   --text-secondary: #4c505e;
-  --text-muted: #8a8fa0;
-  --accent: #3d6fd6;
+  /* WCAG 2.1 AA。旧值 #868c9c 对 --bg-primary 仅 3.25:1，只够大号文字
+     （AA-large，≥3:1），正文不达标。降深到 #666a77 后对 primary/tertiary/
+     hover 三种承载面分别为 5.22 / 4.86 / 4.61，全部 ≥4.5 且色相与蓝灰一致。 */
+  --text-muted: #666a77;
+  --accent: #3768c7;
   --accent-hover: #5081e8;
   --accent-dim: rgba(61, 111, 214, 0.08);
-  --green: #3a9c5a;
-  --orange: #d68c2e;
-  --red: #d64a5e;
-  --yellow: #c99016;
+  /* 支柱一「10% 功能色」的 WCAG 2.1 硬性要求。这四个令牌同时扮演两种角色：
+     当文字色（`color:`，共 42 处）和当填充底承载 #fff 白字（toast / tag-chip）。
+     旧值在浅色画布上普遍不达标 —— orange 2.66:1、yellow 2.71:1 属明显违规，
+     green 3.34 / red 4.06 只够 AA-large。全部沿各自色相降深后，两种角色
+     同向改善：as-text 5.10~5.24、as-fill-under-white 5.27~5.41，均 ≥4.5。 */
+  --green: #2d7a46;
+  --orange: #925f1f;
+  --red: #ba4052;
+  --yellow: #8b630f;
   --danger-bg: rgba(214, 74, 94, 0.12);
   --danger-hover: rgba(214, 74, 94, 0.22);
   --danger-border: rgba(214, 74, 94, 0.32);
@@ -103,13 +185,15 @@ html[data-theme="light"] {
   --success-border: rgba(58, 156, 90, 0.3);
   --img-bg: #f0f0f4;
   --scrollbar-track: #eceef2;
-  --scrollbar-thumb: #c8cdd8;
-  --scrollbar-hover: #b0b6c4;
+  --scrollbar-thumb: rgba(44, 47, 58, 0.18);
+  --scrollbar-hover: rgba(44, 47, 58, 0.28);
 
   /* Light-mode elevation is tinted toward the palette's blue-grey rather
-   * than pure black; neutral-black shadows on white look muddy. */
-  --shadow-sm: 0 1px 2px rgba(44, 47, 58, 0.06);
-  --shadow-md: 0 4px 12px rgba(44, 47, 58, 0.08);
+   * than pure black; neutral-black shadows on white look muddy. Each level
+   * pairs a soft shadow with a hairline ring so surfaces can separate
+   * without drawing a literal 1px border. */
+  --shadow-sm: 0 1px 2px rgba(44, 47, 58, 0.05), 0 0 0 1px rgba(44, 47, 58, 0.04);
+  --shadow-md: 0 4px 14px rgba(44, 47, 58, 0.1);
   --shadow-lg: 0 12px 32px rgba(44, 47, 58, 0.12);
   --inset-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.7);
   --ring: 0 0 0 3px var(--accent-dim);
@@ -155,7 +239,6 @@ body {
   gap: 8px;
   padding: 10px 12px;
   background-color: var(--bg-secondary);
-  border-bottom: 1px solid var(--border-color);
 }
 
 .search-wrapper {
@@ -179,13 +262,13 @@ body {
   flex: 1;
   width: 100%;
   padding: 8px 12px 8px 34px;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  background-color: var(--bg-tertiary);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background-color: transparent;
   color: var(--text-primary);
   font-size: 13px;
   outline: none;
-  transition: border-color 0.15s ease, background-color 0.15s ease;
+  transition: border-color var(--dur) var(--ease), background-color var(--dur) var(--ease);
 }
 
 .search-input::placeholder {
@@ -202,14 +285,14 @@ body {
   width: 34px;
   height: 34px;
   border: none;
-  border-radius: 8px;
-  background-color: var(--bg-tertiary);
+  border-radius: var(--radius-md);
+  background-color: transparent;
   color: var(--text-muted);
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.15s ease;
+  transition: all var(--dur) var(--ease);
 }
 
 .clear-btn:hover {
@@ -265,51 +348,79 @@ body {
 .item-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  /* 原 4px 导致卡片视觉粘连——去边框后，间距承担了分组职责，必须给够。
+     提到 8px 让每条独立可辨，但不超过一整条 24px 图标的 1/3，
+     否则列表会显得松散而非松弛。 */
+  gap: var(--sp-2);
 }
 
 /* ===== Item Card ===== */
 .item-card {
   position: relative;
-  padding: 10px 12px;
+  /* 与 .item-list 的 gap 同批调整：只拉外间距不动内边距，会让卡片显得
+     小而空隙大、比例失衡。纵向 6→8px 与 gap 对齐到同一档，横向 10→12px
+     保持略宽于纵向（文字左右需要比上下更多留白才不贴边）。 */
+  padding: var(--sp-2) var(--sp-3);
   background-color: var(--bg-tertiary);
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
+  /* 边框保持存在但透明：一整列都描 1px 实线时，列表会读成一张表格网格，
+     那是"复古"观感最主要的结构性来源。留 transparent 而非直接删除，是为了
+     让 :hover / .selected 切换边框色时不产生 1px 的布局跳动。 */
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
   cursor: pointer;
-  transition: background-color 0.12s ease, border-color 0.12s ease;
+  transition: background-color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+  /* 长历史列表里绝大多数卡片在视口外，跳过它们的排版/绘制。
+     contain-intrinsic-size 必须用 `auto <len>` 双值：`auto` 让浏览器记住
+     上一次真实测量到的高度，<len> 只在首次（从未渲染过）时当占位值。
+     若只写单值，滚动条长度会随内容长短反复跳动。
+     注意：content-visibility: auto 隐含 contain: paint，会裁掉溢出卡片
+     边界的装饰元素。本卡片内的 .copied-badge 是居中定位、不溢出，故安全；
+     新增溢出型徽标时需改为内缩定位。
+     ⚠️ 占位值取"典型卡高"而非最大值，且必须与上面的 padding、
+     .item-content 的 max-height 同批调整——只改其一会让滚动条长度跳动。 */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 68px;
 }
 
+/* 图片卡多一块缩略图，占位高度单独给一个更接近实测值的初值。 */
+.item-card.image {
+  contain-intrinsic-size: auto 136px;
+}
+
+/* 卡片默认已无可见边框，hover 只需底色抬一档即可读出可点击性。
+   此前 hover 描 --text-muted 实边框，在无边框的静息态旁边显得过重。 */
 .item-card:hover {
   background-color: var(--bg-hover);
-  border-color: var(--accent);
 }
 
 .item-card:active {
   background-color: var(--bg-active);
 }
 
+/* 选中态此前是 border + box-shadow 双层描边，叠出视觉 2px 重框。
+   现在只留单层 accent 边框，靠 --accent-dim 底色承担主要辨识度。 */
 .item-card.selected {
   border-color: var(--accent);
   background-color: var(--accent-dim);
-  box-shadow: 0 0 0 1px var(--accent);
 }
 
 .item-content {
   color: var(--text-secondary);
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 80px;
+  max-height: 56px;
   overflow: hidden;
-  font-size: 13px;
-  line-height: 1.45;
+  font-size: var(--fs-md);
+  line-height: 1.4;
 }
 
 .item-card.image .item-content {
-  max-height: 120px;
+  max-height: 96px;
 }
 
 .item-card.files .item-content {
-  max-height: 100px;
+  max-height: 76px;
 }
 
 /* ===== Item Meta ===== */
@@ -318,7 +429,7 @@ body {
   justify-content: flex-end;
   align-items: center;
   gap: 2px;
-  margin-top: 6px;
+  margin-top: 3px;
 }
 
 .item-type-badge {
@@ -330,7 +441,7 @@ body {
 }
 
 .item-time {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--text-muted);
   margin-right: 4px;
 }
@@ -338,17 +449,18 @@ body {
 .fav-btn,
 .delete-btn,
 .tag-add-btn {
-  width: 26px;
-  height: 26px;
+  /* 24px 是可用点击热区的下限，不要再往下压。 */
+  width: 24px;
+  height: 24px;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background-color: transparent;
   color: var(--text-muted);
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.12s ease;
+  transition: all var(--dur-fast) var(--ease);
 }
 
 .delete-btn:hover {
@@ -383,17 +495,22 @@ body {
   background-color: var(--accent);
   color: #fff;
   padding: 6px 18px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   font-size: 13px;
   font-weight: 600;
   pointer-events: none;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--shadow-md);
 }
 
 /* ===== Favorited ===== */
 .item-card.favorited {
-  border-left: 3px solid var(--yellow);
-  padding-left: 10px;
+  /* ⚠️ 左侧总宽必须等于普通卡片的 1px(透明边框) + 12px(--sp-3) = 13px，
+     否则收藏卡的文字会相对其他卡片横向错开，垂直列表里一眼可见。
+     这里 4px 实边框 + 9px 内距 = 13px 对齐。
+     9px 不在 4px 网格上，但对齐优先于栅格洁癖——栅格是手段，
+     视觉一致才是目的。 */
+  border-left: 4px solid var(--yellow);
+  padding-left: 9px;
 }
 
 /* ===== Favorites Filter Button ===== */
@@ -401,14 +518,14 @@ body {
   width: 34px;
   height: 34px;
   border: none;
-  border-radius: 8px;
-  background-color: var(--bg-tertiary);
+  border-radius: var(--radius-md);
+  background-color: transparent;
   color: var(--text-muted);
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.15s ease;
+  transition: all var(--dur) var(--ease);
 }
 
 .filter-btn:hover {
@@ -431,7 +548,7 @@ body {
 .item-image img {
   max-width: 100%;
   max-height: 80px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   object-fit: contain;
   background: var(--img-bg);
 }
@@ -439,6 +556,28 @@ body {
 .img-placeholder {
   color: var(--text-muted);
   font-size: 12px;
+}
+
+/* LazyImage 在 <img> 外多包了一层 .lazy-image-wrapper。
+   注意 .item-image img 是后代选择器，多套一层 div 后依然命中，
+   所以尺寸/圆角规则无需重复——这里只需要处理新增的包裹层本身：
+   给它一个最小高度，避免图片进入视口前该行高度为 0、
+   加载完成瞬间把下方内容顶开（列表滚动位置会跳）。 */
+.item-image .lazy-image-wrapper {
+  display: flex;
+  align-items: center;
+  min-height: 24px;
+}
+
+/* 淡入，避免图片解码完成时硬切。已在文件末尾的
+   prefers-reduced-motion 段落里统一关掉动画。 */
+.item-image .lazy-image-loading {
+  opacity: 0;
+}
+
+.item-image .lazy-image-loaded {
+  opacity: 1;
+  transition: opacity var(--dur) var(--ease);
 }
 
 .item-desc {
@@ -472,8 +611,8 @@ body {
   cursor: pointer;
   color: var(--text-secondary);
   padding: 2px 6px;
-  border-radius: 4px;
-  transition: background-color 0.12s ease, color 0.12s ease;
+  border-radius: var(--radius-xs);
+  transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
   display: flex;
   align-items: center;
   gap: 4px;
@@ -513,7 +652,7 @@ body {
 .footer {
   padding: 6px 12px;
   background-color: var(--bg-secondary);
-  border-top: 1px solid var(--border-color);
+  border-top: 1px solid var(--border-subtle);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -537,15 +676,14 @@ body {
   overflow: hidden;
 }
 
+/* 提示文字此前描边框 + 填充底色，看起来像一排可点的小按钮，实际不可交互。
+   降为纯文字，只靠字号与弱化色表达「辅助信息」。 */
 .footer-hint {
   font-size: 11px;
   color: var(--text-muted);
   font-weight: 500;
   white-space: nowrap;
-  padding: 2px 6px;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  background-color: var(--bg-tertiary);
+  padding: 2px 4px;
 }
 
 .autostart-btn {
@@ -553,15 +691,15 @@ body {
   align-items: center;
   gap: 5px;
   padding: 4px 10px;
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  background-color: var(--bg-tertiary);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background-color: transparent;
   color: var(--text-muted);
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
-  transition: all 0.15s ease;
+  transition: all var(--dur) var(--ease);
 }
 
 .autostart-btn:hover {
@@ -573,6 +711,14 @@ body {
   background-color: var(--accent-dim);
   color: var(--accent);
   border-color: var(--accent);
+}
+
+/* 拖拽分栏时 body 级的批量样式重写。此选择器绕过了逐属性设置
+   body.style.* 时的多次 reflow；详细说明见 useVerticalSplit.ts 的
+   js-batch-dom-css 规则修复。 */
+body.dragging {
+  user-select: none;
+  cursor: row-resize;
 }
 
 /* ===== Image Modal ===== */
@@ -596,7 +742,7 @@ body {
   object-fit: contain;
   border-radius: 0;
   user-select: none;
-  transition: transform 0.05s ease-out;
+  transition: transform var(--dur-fast) ease-out;
 }
 
 .image-modal-controls {
@@ -619,14 +765,14 @@ body {
   width: 32px;
   height: 32px;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: rgba(255, 255, 255, 0.08);
   color: #fff;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: background 0.12s ease;
+  transition: background var(--dur-fast) var(--ease);
 }
 
 .image-modal-controls button:hover {
@@ -647,7 +793,7 @@ body {
   left: 50%;
   transform: translateX(-50%);
   padding: 8px 18px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   font-size: 13px;
   font-weight: 500;
   z-index: 9999;
@@ -655,8 +801,8 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  animation: toast-slide-in 0.2s ease;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  animation: toast-slide-in var(--dur) var(--ease);
+  box-shadow: var(--shadow-md);
 }
 
 .toast-success {
@@ -704,7 +850,7 @@ body {
   display: inline-flex;
   align-items: center;
   padding: 3px 10px;
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   font-size: 11px;
   font-weight: 600;
   background: rgba(224, 175, 104, 0.12);
@@ -712,7 +858,7 @@ body {
   border: 1px solid rgba(224, 175, 104, 0.25);
   cursor: pointer;
   user-select: none;
-  transition: all 0.15s ease;
+  transition: all var(--dur) var(--ease);
   white-space: nowrap;
 }
 
@@ -730,30 +876,34 @@ body {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-  margin-top: 6px;
+  margin-top: 4px;
   align-items: center;
 }
 
+/* 原本是紫蓝渐变 + 700 粗体 + 彩色投影，三样叠在一起是典型的
+   2015 年 material 风，也是"复古感"在列表里最集中的一处。
+   改为扁平的低饱和色片：标签是元数据，不该比正文还抢眼。 */
 .tag-badge {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 2px 8px;
-  border-radius: 10px;
-  font-size: 11px;
-  font-weight: 700;
-  background: linear-gradient(135deg, #7aa2f7, #bb9af7);
-  color: #fff;
+  padding: 1px 6px;
+  border-radius: var(--radius-xs);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  background: var(--accent-dim);
+  color: var(--accent);
+  border: 1px solid transparent;
   cursor: pointer;
   user-select: none;
-  transition: all 0.15s ease;
+  transition: background-color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
   white-space: nowrap;
-  box-shadow: 0 1px 4px rgba(122, 162, 247, 0.3);
 }
 
 .tag-badge:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 2px 8px rgba(122, 162, 247, 0.5);
+  background: var(--bg-hover);
+  border-color: var(--accent);
 }
 
 .tag-remove {
@@ -801,13 +951,13 @@ body {
 .exec-confirm-dialog {
   background: var(--bg-secondary);
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   padding: 24px 24px 20px;
   max-width: 400px;
   width: 90%;
   text-align: center;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
-  animation: dialog-pop 0.2s ease;
+  box-shadow: var(--shadow-lg);
+  animation: dialog-pop var(--dur) var(--ease);
 }
 
 @keyframes dialog-pop {
@@ -847,7 +997,7 @@ body {
   color: var(--text-secondary);
   background: var(--bg-tertiary);
   border: 1px solid var(--border-color);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 8px 10px;
   margin-bottom: 16px;
   white-space: nowrap;
@@ -865,13 +1015,13 @@ body {
   flex: 1;
   padding: 8px 16px;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-tertiary);
   color: var(--text-secondary);
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all var(--dur) var(--ease);
 }
 
 .exec-btn-cancel:hover {
@@ -882,13 +1032,13 @@ body {
   flex: 1;
   padding: 8px 16px;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--orange);
   color: #fff;
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all var(--dur) var(--ease);
 }
 
 .exec-btn-open:hover {
@@ -900,7 +1050,7 @@ body {
   color: var(--accent);
   text-decoration: underline;
   cursor: pointer;
-  transition: color 0.12s ease;
+  transition: color var(--dur-fast) var(--ease);
 }
 .url-link:hover {
   color: var(--accent-hover);
@@ -908,21 +1058,21 @@ body {
 
 /* ===== Date Group ===== */
 .date-group {
-  margin-bottom: 4px;
+  margin-bottom: 2px;
 }
 .group-header {
   position: sticky;
   top: 0;
   z-index: 5;
-  padding: 4px 8px;
-  font-size: 11px;
-  font-weight: 700;
+  padding: 6px 8px 3px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
   color: var(--text-muted);
   background-color: var(--bg-primary);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  border-bottom: 1px solid var(--border-color);
-  margin-bottom: 4px;
+  /* uppercase + letter-spacing 对「今天 / 昨天 / 2026-09-08」这类中文与数字
+     标签不产生任何视觉效果，只会拉宽字距显得刻板；分割线也去掉，靠上方留白
+     分组即可 —— 每组都描一条线会把列表重新变回表格。 */
+  margin-bottom: 2px;
 }
 
 /* ===== Tag Autocomplete ===== */
@@ -937,9 +1087,9 @@ body {
   z-index: 20;
   background-color: var(--bg-secondary);
   border: 1px solid var(--border-color);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 4px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--shadow-md);
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -949,9 +1099,9 @@ body {
   padding: 3px 8px;
   font-size: 12px;
   color: var(--text-secondary);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   cursor: pointer;
-  transition: background-color 0.1s ease;
+  transition: background-color var(--dur-fast) var(--ease);
 }
 .tag-suggestion-item:hover {
   background-color: var(--accent-dim);
@@ -966,11 +1116,11 @@ body {
   width: 28px;
   height: 28px;
   border: 1px solid var(--border-color);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background-color: var(--bg-tertiary);
   color: var(--text-muted);
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all var(--dur) var(--ease);
 }
 .theme-btn:hover {
   color: var(--accent);
@@ -997,12 +1147,12 @@ body {
   padding: 8px 16px;
   background-color: var(--bg-secondary);
   border: 1px solid var(--border-color);
-  border-radius: 8px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
   font-size: 13px;
   color: var(--text-secondary);
   z-index: 100;
-  animation: toast-slide-up 0.2s ease;
+  animation: toast-slide-up var(--dur) var(--ease);
 }
 .undo-toast button {
   display: flex;
@@ -1010,13 +1160,13 @@ body {
   gap: 4px;
   padding: 4px 10px;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--accent);
   color: #fff;
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
-  transition: background 0.15s ease;
+  transition: background var(--dur) var(--ease);
 }
 .undo-toast button:hover {
   background: var(--accent-hover);
@@ -1031,15 +1181,15 @@ body {
   width: 34px;
   height: 34px;
   border: none;
-  border-radius: 8px;
-  background-color: var(--bg-tertiary);
+  border-radius: var(--radius-md);
+  background-color: transparent;
   color: var(--text-muted);
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  transition: all 0.15s ease;
+  transition: all var(--dur) var(--ease);
 }
 .toolbar-btn:hover {
   background-color: var(--bg-hover);
@@ -1075,10 +1225,10 @@ body {
   min-width: 160px;
   background-color: var(--bg-secondary);
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 4px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-  animation: dialog-pop 0.12s ease;
+  box-shadow: var(--shadow-lg);
+  animation: dialog-pop var(--dur-fast) var(--ease);
 }
 .ctx-item {
   display: flex;
@@ -1093,7 +1243,7 @@ body {
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.1s ease;
+  transition: all var(--dur-fast) var(--ease);
   text-align: left;
 }
 .ctx-header {
@@ -1125,12 +1275,12 @@ body {
 .settings-dialog {
   background: var(--bg-secondary);
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   padding: 24px;
   max-width: 460px;
   width: 90%;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
-  animation: dialog-pop 0.2s ease;
+  box-shadow: var(--shadow-lg);
+  animation: dialog-pop var(--dur) var(--ease);
 }
 .settings-title {
   font-size: 16px;
@@ -1154,13 +1304,13 @@ body {
   width: 100%;
   padding: 9px 12px;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background-color: var(--bg-tertiary);
   color: var(--text-primary);
   font-size: 14px;
   outline: none;
   box-sizing: border-box;
-  transition: border-color 0.15s ease;
+  transition: border-color var(--dur) var(--ease);
 }
 .settings-input:focus {
   border-color: var(--accent);
@@ -1176,13 +1326,13 @@ body {
   flex: 1;
   padding: 10px 14px;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background-color: var(--bg-tertiary);
   color: var(--text-secondary);
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all var(--dur) var(--ease);
   justify-content: center;
 }
 .settings-action-btn:hover {
@@ -1226,25 +1376,27 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
-  border: 1px solid rgba(127, 127, 127, 0.2);
+  box-shadow: var(--shadow-lg);
+  border: 1px solid var(--border-color);
 }
 .preview-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   padding: 8px 12px;
-  border-bottom: 1px solid rgba(127, 127, 127, 0.2);
+  border-bottom: 1px solid var(--border-subtle);
 }
 .preview-tabs { display: flex; gap: 4px; }
 .preview-tab {
   padding: 4px 12px;
   background: transparent;
-  border: 1px solid rgba(127, 127, 127, 0.25);
+  border: 1px solid var(--border-color);
   color: inherit;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--fs-sm);
+  transition: background-color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
 }
 .preview-tab.active {
   background: var(--accent, #4a9eff);
@@ -1255,23 +1407,31 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: inherit;
   opacity: 0.85;
 }
 .preview-lang-select {
   background: transparent;
   color: inherit;
-  border: 1px solid rgba(127, 127, 127, 0.35);
-  border-radius: 6px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
   padding: 3px 8px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   cursor: pointer;
   min-width: 110px;
 }
 .preview-lang-select:focus {
   outline: none;
   border-color: var(--accent, #4a9eff);
+}
+
+/* 内容超长导致高亮被禁用时的常驻说明文案。用 --text-secondary 保持次要信息
+   的视觉层级，不与语言下拉抢注意力。 */
+.preview-lang-note {
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
 }
 .preview-actions { display: flex; gap: 6px; align-items: center; }
 .preview-btn {
@@ -1280,13 +1440,16 @@ body {
   color: inherit;
   cursor: pointer;
   padding: 4px 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   font-size: 14px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
 }
-.preview-btn:hover { background: rgba(127, 127, 127, 0.15); }
+.preview-btn:hover {
+  background: var(--bg-hover);
+  border-radius: var(--radius-sm);
+}
 .preview-close { font-size: 20px; line-height: 1; }
 .preview-body {
   flex: 1;
@@ -1314,16 +1477,17 @@ body {
 .preview-markdown ul,
 .preview-markdown ol { padding-left: 1.6em; margin: 0.4em 0; }
 .preview-markdown code {
-  background: rgba(127, 127, 127, 0.18);
+  background: var(--bg-tertiary);
   padding: 1px 5px;
-  border-radius: 3px;
-  font-family: 'Consolas', 'Monaco', monospace;
+  border-radius: var(--radius-xs);
+  font-family: var(--font-mono);
   font-size: 0.9em;
 }
 .preview-markdown pre {
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle);
   padding: 10px 12px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   overflow-x: auto;
 }
 .preview-markdown pre code { background: none; padding: 0; }
@@ -1331,23 +1495,60 @@ body {
   border-left: 3px solid var(--accent, #4a9eff);
   padding-left: 10px;
   margin: 0.5em 0;
-  color: rgba(127, 127, 127, 0.9);
+  color: var(--text-secondary);
 }
 .preview-markdown table { border-collapse: collapse; margin: 0.5em 0; }
 .preview-markdown th,
 .preview-markdown td {
-  border: 1px solid rgba(127, 127, 127, 0.3);
+  border: 1px solid var(--border-color);
   padding: 4px 8px;
 }
 .preview-markdown a { color: var(--accent, #4a9eff); text-decoration: none; }
 .preview-markdown a:hover { text-decoration: underline; }
-.preview-markdown hr { border: none; border-top: 1px solid rgba(127, 127, 127, 0.25); margin: 1em 0; }
-.preview-code { height: 100%; font-size: 13px; overflow: auto; }
+.preview-markdown hr { border: none; border-top: 1px solid var(--border-subtle); margin: 1em 0; }
+.preview-code { height: 100%; font-size: var(--fs-md); overflow: auto; }
 .preview-code pre { margin: 0 !important; background: transparent !important; padding: 0 !important; white-space: pre !important; overflow-x: auto; }
-.preview-code code { font-family: 'Consolas', 'Monaco', 'Courier New', monospace !important; white-space: pre !important; }
+.preview-code code { font-family: var(--font-mono) !important; white-space: pre !important; }
 .preview-footer {
   padding: 6px 12px;
-  font-size: 11px;
-  color: rgba(127, 127, 127, 0.85);
-  border-top: 1px solid rgba(127, 127, 127, 0.2);
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* 超长内容跳过格式化/高亮时的提示条。用 rgba 字面量而非 color-mix，
+   保证旧 WebView 也能正确渲染。 */
+.preview-toolong-hint {
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--yellow);
+  background-color: rgba(255, 193, 7, 0.12);
+  border-bottom: 1px solid rgba(255, 193, 7, 0.28);
+}
+
+/* ===== Focus Ring（统一键盘焦点提示） =====
+   只用既有 --ring token，深浅主题都已定义。用 :focus-visible 而非 :focus，
+   避免鼠标点击也弹环。已有自定义 focus 样式的选择器（ApiApp.css /
+   JsonView.css）特异性更高，不会被这里覆盖成双环。 */
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+[tabindex]:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+/* ===== 降低动效偏好兜底 =====
+   系统开启「减少动态效果」时，把动画/过渡压到近似瞬时（而非 0，0 在部分
+   浏览器会导致 transitionend 不触发，依赖该事件的逻辑会卡死）。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
