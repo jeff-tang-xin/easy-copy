@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, useMemo, memo } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo, memo, useLayoutEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { enable, isEnabled, disable } from "@tauri-apps/plugin-autostart";
@@ -9,12 +9,14 @@ import { useClipboard, type AppConfig, type ClipboardItem } from "./hooks/useCli
 import { useWindowLifecycle } from "./hooks/useWindowLifecycle";
 import { LazyImage } from "./components/LazyImage";
 import { SettingsDialog } from "./components/SettingsDialog";
+import { ConfirmModal } from "./components/Modal";
 import {
   IconSearch, IconTrash, IconText, IconFiles,
   IconPower, IconWarning, IconZoomIn, IconZoomOut, IconZoomReset,
   IconSun, IconMoon, IconAuto, IconUndo, IconIncognito,
   IconSettings, IconCopy, TypeIcon,
-  IconGlobe, IconNote, IconWrench, IconCamera,
+  IconGlobe, IconNote, IconWrench, IconCamera, IconX,
+  IconImage, IconFolder,
 } from "./components/Icons";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -163,6 +165,19 @@ interface PreviewModalProps {
  * 抽成真正的组件后，Hook 位于组件顶层，条件渲染只决定组件是否挂载，合法。
  */
 function PreviewModal({ item, lang, onLangChange, onClose, onCopy, codeStyle }: PreviewModalProps) {
+  // 复制按钮的瞬时反馈：点击后短暂显示「已复制✓」，与列表卡片的 copied-badge 一致。
+  const [copied, setCopied] = useState(false);
+  const copyTimerRef = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
+  }, []);
+  const handleCopyClick = () => {
+    onCopy(item.id);
+    setCopied(true);
+    if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = window.setTimeout(() => setCopied(false), 1500);
+  };
+
   // 廉价的提前退出：内容超长时无论用户选了什么语言都强制走纯文本。
   // 注意这里用的是**字符数**而不是字节数：中文按 UTF-8 是 3 字节，
   // 若按字节判断，中文内容会被当成 3 倍大，用户远未卡顿就被剥夺高亮。
@@ -207,7 +222,9 @@ function PreviewModal({ item, lang, onLangChange, onClose, onCopy, codeStyle }: 
             )}
           </div>
           <div className="preview-actions">
-            <button className="preview-btn" onClick={() => onCopy(item.id)} title="复制"><IconCopy /></button>
+            <button className="preview-btn" onClick={handleCopyClick} title={copied ? "已复制" : "复制"}>
+              {copied ? "已复制✓" : <IconCopy />}
+            </button>
             <button className="preview-btn preview-close" onClick={onClose} title="关闭">×</button>
           </div>
         </div>
@@ -216,7 +233,10 @@ function PreviewModal({ item, lang, onLangChange, onClose, onCopy, codeStyle }: 
             <pre className="preview-raw">{item.content}</pre>
           ) : effectiveLang === 'markdown' ? (
             <div className="preview-markdown">
-              <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={(url) => url}>{item.content}</ReactMarkdown>
+              {/* 不传 urlTransform：react-markdown 9 的 defaultUrlTransform 只放行
+                  http/https/mailto 等安全协议，javascript: 会被剥成相对路径。
+                  之前这里传恒等函数等于绕过消毒（安全硬线）。 */}
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{item.content}</ReactMarkdown>
             </div>
           ) : (
             <div className="preview-code">
@@ -283,21 +303,23 @@ interface ItemCardProps {
    * 比不加 memo 还差。
    */
   imageUrl?: string;
+  /** 本行图片是否加载失败（来自 useClipboard 的 imageErrors）。 */
+  imageError?: boolean;
+  /** 重试加载本行图片（useClipboard 的 retryImage，引用稳定）。 */
+  onRetryImage?: (id: string) => void;
   /**
    * 搜索词**必须**作为 prop 传入。原实现从 searchRef.current 读，
    * 而 ref 变化不触发重渲染——过去能工作纯粹因为 App 每次 setState 都整体重渲染。
    * 一旦本组件被 memo 包住，从 ref 读就会让高亮永久停在旧关键词。
    */
   search: string;
-  copyOnDoubleClick: boolean;
+  onOpenUrl: (url: string) => void;
   onCopy: (id: string) => void;
   onSelect: (index: number) => void;
   onContextMenu: (e: React.MouseEvent, itemId: string) => void;
   onPreview: (item: ClipboardItem) => void;
   onDelete: (id: string, e: React.MouseEvent) => void;
   onOpenFile: (filePath: string, e: React.MouseEvent) => void;
-  onEnlargeImage: (url: string) => void;
-  onOpenUrl: (url: string) => void;
 }
 
 /**
@@ -313,16 +335,16 @@ const ItemCard = memo(function ItemCard({
   isSelected,
   isCopied,
   imageUrl,
+  imageError,
+  onRetryImage,
   search,
-  copyOnDoubleClick,
+  onOpenUrl,
   onCopy,
   onSelect,
   onContextMenu,
   onPreview,
   onDelete,
   onOpenFile,
-  onEnlargeImage,
-  onOpenUrl,
 }: ItemCardProps) {
   const renderContent = () => {
     if (item.type === "Image") {
@@ -331,12 +353,23 @@ const ItemCard = memo(function ItemCard({
           {imageUrl ? (
             // LazyImage 基于 IntersectionObserver：视口外的图片根本不会进入
             // <img>，200+ 条图片记录时能省掉大量无谓的 base64 解码与解压。
-            // 它会把未识别的 props（这里是 onDoubleClick）透传到内部 <img>。
+            // 未识别的 props 会透传到内部 <img>（当前无额外 props）。
             <LazyImage
               src={imageUrl}
               alt="clipboard image"
-              onDoubleClick={() => onEnlargeImage(imageUrl)}
             />
+          ) : imageError ? (
+            // 加载失败占位 + 重试：失败不再弹全局 toast，就地给出恢复入口。
+            <span className="img-error">
+              图片加载失败
+              <button
+                className="img-retry-btn"
+                onClick={(e) => { e.stopPropagation(); onRetryImage?.(item.id); }}
+                title="重新加载图片"
+              >
+                重试
+              </button>
+            </span>
           ) : (
             <span className="img-placeholder">加载中…</span>
           )}
@@ -417,21 +450,23 @@ const ItemCard = memo(function ItemCard({
       className={`item-card ${(item.type || 'text').toLowerCase()} ${isSelected ? "selected" : ""}`}
       onClick={() => { onSelect(index); onCopy(item.id); }}
       onContextMenu={(e) => onContextMenu(e, item.id)}
-      onDoubleClick={(e) => {
-        e.stopPropagation();
-        // Double-click copies by default (configurable).
-        if (copyOnDoubleClick) {
-          onCopy(item.id);
-        } else if (item.type === "Text") {
-          onPreview(item);
-        }
-      }}
     >
       <div className="item-content">{renderContent()}</div>
       <div className="item-meta">
-        <span className="item-type-badge"><TypeIcon type={item.type} /></span>
+        <span className={`item-type-badge type-${(item.type || "text").toLowerCase()}`}><TypeIcon type={item.type} /></span>
         {item.saved_as_note && <span className="item-saved-note" title="已存为笔记"><IconNote /></span>}
         <span className="item-time">{formatTime(item.timestamp)}</span>
+        {/* 显式预览入口：双击已按类型分派（文本→预览），这个按钮给不想记手势的用户，
+            不可发现。与删除钮并列给一个常驻按钮（仅文本条目，与右键菜单一致）。 */}
+        {item.type === "Text" && (
+          <button
+            className="card-preview-btn"
+            onClick={(e) => { e.stopPropagation(); onPreview(item); }}
+            title="预览"
+          >
+            <IconText />
+          </button>
+        )}
         <button
           className="delete-btn"
           onClick={(e) => onDelete(item.id, e)}
@@ -451,6 +486,22 @@ function App() {
   // Toast: shared hook
   const { toast, showToast } = useToast();
 
+  // Settings panel state — 声明在 useClipboard 之前：autoHideOnCopy 选项
+  // 需要读 config.auto_hide_on_copy（const 存在 TDZ，顺序不能反）。
+  const [showSettings, setShowSettings] = useState(false);
+  const [config, setConfig] = useState<AppConfig>({
+    max_items: 500,
+    poll_interval_ms: 500,
+    clipboard_shortcut: "Ctrl+Shift+V",
+    notes_shortcut: "Ctrl+Shift+N",
+    tools_shortcut: "Ctrl+Shift+T",
+    screenshot_shortcut: "Ctrl+Shift+S",
+    api_shortcut: "Ctrl+Shift+U",
+    copy_on_double_click: true,
+    auto_hide_on_copy: true,
+    storage_root: null,
+  });
+
   // Clipboard state & operations — all IPC + caching + debounced search
   // is encapsulated in useClipboard. App.tsx is now pure rendering.
   const {
@@ -459,6 +510,8 @@ function App() {
     setSearch,
     copiedId,
     imageCache,
+    imageErrors,
+    retryImage,
     stats,
     incognito,
     refresh,
@@ -470,7 +523,12 @@ function App() {
     handleToggleIncognito,
     handleExport,
     handleImport,
-  } = useClipboard({ showToast });
+  } = useClipboard({
+    showToast,
+    // 复制后自动隐藏（设置项，默认开）。config 未加载完成时默认值即 true，
+    // 与后端 serde default 一致。
+    autoHideOnCopy: config.auto_hide_on_copy !== false,
+  });
 
   // `setSearch` 来自 useClipboard，内部已内建防抖：调用时立即更新受控输入值，
   // 真正的查询延迟 150ms 触发，并用世代号（searchGenRef）丢弃过期响应，
@@ -492,22 +550,27 @@ function App() {
   // Clear all confirmation dialog
   const [clearConfirm, setClearConfirm] = useState(false);
 
-  // Keyboard navigation selection
-  const [selectedIndex, setSelectedIndex] = useState(-1);
+  // Keyboard navigation selection — 以「选中条目的 id」为唯一事实源，
+  // selectedIndex 由列表派生。refresh 会整体替换 items 数组（新条目插在
+  // 头部），按 id 派生让选中项自动跟随原条目移动，键盘浏览不被打断。
+  const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  // Settings panel
-  const [showSettings, setShowSettings] = useState(false);
-  const [config, setConfig] = useState<AppConfig>({
-    max_items: 500,
-    poll_interval_ms: 500,
-    clipboard_shortcut: "Ctrl+Shift+V",
-    notes_shortcut: "Ctrl+Shift+N",
-    tools_shortcut: "Ctrl+Shift+T",
-    screenshot_shortcut: "Ctrl+Shift+S",
-    api_shortcut: "Ctrl+Shift+U",
-    copy_on_double_click: true,
-    storage_root: null,
-  });
+  // ── 类型筛选 ──
+  // "all" 显示全部；其余按后端 item_type 精确匹配。Url 由后端写入时
+  // classify_text 判定、旧 Text 记录在 load 时升级，前端不做二次判定。
+  // 键盘导航/分组渲染全部走 visibleItems，索引天然跟随筛选后的列表。
+  const [typeFilter, setTypeFilter] = useState<"all" | "Text" | "Url" | "Image" | "Files">("all");
+  const visibleItems = useMemo(
+    () => (typeFilter === "all" ? items : items.filter((i) => i.type === typeFilter)),
+    [items, typeFilter]
+  );
+
+  const selectedIndex = useMemo(
+    () => visibleItems.findIndex((i) => i.id === selectedId),
+    [visibleItems, selectedId]
+  );
+
+  // Settings panel state 已上移到 useClipboard 之前（autoHideOnCopy 依赖）。
 
   // Search input ref — for auto-focus on mouse enter.
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -518,50 +581,50 @@ function App() {
   // Image viewer zoom & pan state
   const [imageZoom, setImageZoom] = useState(1);
   const [imagePos, setImagePos] = useState({ x: 0, y: 0 });
+  const enlargedImageRef = useRef<HTMLImageElement>(null);
   const isDraggingRef = useRef(false);
   const dragStartRef = useRef({ x: 0, y: 0 });
   const posStartRef = useRef({ x: 0, y: 0 });
-
-  // Track whether the window was maximized by us (to restore on close)
-  const wasFullscreenRef = useRef(false);
 
   // Window lifecycle: hide-on-close + shortcut-error toasts.
   // Clipboard-update refresh is handled inside useClipboard.
   useWindowLifecycle({ showToast });
 
-  const openEnlargedImage = useCallback(async (url: string) => {
-    wasFullscreenRef.current = true;
-    try {
-      const win = getCurrentWindow();
-      await win.setDecorations(false);
-      await win.maximize();
-    } catch (e) {
-      // Silently fall back to the in-app zoom view (image is still shown
-      // at its natural size in the modal). Window decoration glitches are
-      // cosmetic and recoverable on next open; not worth a toast.
-      console.error("Failed to maximize window:", e);
-    }
+  const openEnlargedImage = useCallback((url: string) => {
+    // 应用内全屏 overlay（.image-modal-overlay 本身就是 fixed inset:0）。
+    // 不再最大化窗口/去边框：那会让整个应用失去窗口控制，且 setDecorations
+    // 失败时可能留下无边框窗口；overlay 方案关闭后也无需恢复任何窗口状态。
     setImageZoom(1);
     setImagePos({ x: 0, y: 0 });
     setEnlargedImage(url);
+    // 双击的第一击已经触发「单击复制 → 自动隐藏」，窗口此刻可能正在隐藏。
+    // 用户明确要看大图，把窗口拉回前台（对已显示窗口是 no-op，无副作用）。
+    void getCurrentWindow().show();
+    void getCurrentWindow().setFocus();
   }, []);
 
-  const closeEnlargedImage = useCallback(async () => {
+  const closeEnlargedImage = useCallback(() => {
     setEnlargedImage(null);
-    if (wasFullscreenRef.current) {
-      wasFullscreenRef.current = false;
-      try {
-        const win = getCurrentWindow();
-        await win.unmaximize();
-        await win.setDecorations(true);
-      } catch (e) {
-        // Surface this one: if we can't restore the window chrome, the user
-        // is about to interact with a borderless/invisible-frame window with
-        // no way to know why. They need to be told.
-        showToast(friendlyError(e, "恢复窗口失败"), "error");
+  }, []);
+
+  // 双击在「适配窗口」与「100% 原始像素」之间切换（未缩放时双击不再=关闭）。
+  // 注意 .image-modal-img 有 max-width/max-height:100vw/100vh，zoom=1 时显示
+  // 的是 CSS 适配后的尺寸而非原始像素——100% 需按 naturalWidth/offsetWidth
+  // 换算出真实缩放比。图片本就小于视口时适配即 100%，无需切换。
+  const toggleImageFit = useCallback(() => {
+    const img = enlargedImageRef.current;
+    if (!img || img.naturalWidth === 0) return;
+    if (imageZoom !== 1 || imagePos.x !== 0 || imagePos.y !== 0) {
+      setImageZoom(1);
+      setImagePos({ x: 0, y: 0 });
+    } else {
+      const naturalScale = img.naturalWidth / img.offsetWidth;
+      if (naturalScale > 1) {
+        setImageZoom(naturalScale);
+        setImagePos({ x: 0, y: 0 });
       }
     }
-  }, [showToast]);
+  }, [imageZoom, imagePos]);
 
   // 稳定引用，供 PreviewModal 的 onClose 使用，避免每次渲染换新函数。
   const closePreview = useCallback(() => setPreviewItem(null), []);
@@ -641,6 +704,10 @@ function App() {
       const target = e.target as HTMLElement;
       const inField = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
 
+      // 弹窗打开时完全让路：Modal/ConfirmModal 自带 Esc/遮罩关闭逻辑，
+      // 这里再处理会抢事件（例如 Esc 同时关掉弹窗又隐藏整个窗口）。
+      if (showSettings || execConfirm || clearConfirm) return;
+
       // Image preview has highest priority — Escape closes it, everything
       // else is swallowed so the underlying ↑/↓ can't fire on the stale items
       // list at the same time.
@@ -652,35 +719,66 @@ function App() {
         if (e.key === 'Escape') setPreviewItem(null);
         return;
       }
-      if (inField) return;
 
-      if (e.key === 'ArrowDown') {
+      const navigate = (delta: number) => {
         e.preventDefault();
-        setSelectedIndex((prev) => Math.min(prev + 1, items.length - 1));
-      } else if (e.key === 'ArrowUp') {
+        const next = Math.min(Math.max(selectedIndex + delta, 0), visibleItems.length - 1);
+        setSelectedId(visibleItems[next]?.id ?? null);
+      };
+      const copySelected = () => {
+        if (selectedIndex < 0 || selectedIndex >= visibleItems.length) return;
         e.preventDefault();
-        setSelectedIndex((prev) => Math.max(prev - 1, 0));
-      } else if (e.key === 'Enter' && selectedIndex >= 0 && selectedIndex < items.length) {
+        const targetItem = visibleItems[selectedIndex];
+        if (targetItem) void handleCopy(targetItem.id);
+      };
+
+      if (inField) {
+        // 焦点在搜索框（默认 autoFocus，是最常见状态）：
+        // ↑↓/Enter 仍服务列表导航；Esc 先清搜索词，无词才隐藏窗口。
+        if (e.key === 'ArrowDown') navigate(1);
+        else if (e.key === 'ArrowUp') navigate(-1);
+        else if (e.key === 'Enter') copySelected();
+        else if (e.key === 'Escape') {
+          e.preventDefault();
+          if (search.trim()) {
+            setSearch("");
+          } else {
+            getCurrentWindow().hide();
+          }
+        }
+        return;
+      }
+
+      if (e.key === 'ArrowDown') navigate(1);
+      else if (e.key === 'ArrowUp') navigate(-1);
+      else if (e.key === 'Enter') copySelected();
+      else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedIndex >= 0) {
+        // 键盘删除选中项（输入框聚焦时不会走到这里——inField 分支已 return）。
+        // 复用 handleDelete 的撤销 toast，误删可在 8s 内撤销。
         e.preventDefault();
-        const targetItem = items[selectedIndex];
-        if (targetItem) handleCopy(targetItem.id);
+        const targetItem = visibleItems[selectedIndex];
+        if (targetItem) {
+          void delRef.current(targetItem.id, { stopPropagation: () => {} } as React.MouseEvent);
+        }
       } else if (e.key === 'Escape') {
         getCurrentWindow().hide();
       }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [items, selectedIndex, enlargedImage, previewItem, closeEnlargedImage]);
+  }, [visibleItems, selectedIndex, search, enlargedImage, previewItem, showSettings,
+      execConfirm, clearConfirm, closeEnlargedImage, handleCopy, setSearch]);
 
   // Remove the older single-purpose effect that only listened for Escape on
   // the image modal. Its job is now folded into the unified handler above.
   // (Keeping both installed leads to a window where both handlers fire and
   // close the modal twice.)
 
-  // Reset selection when list changes
+  // 搜索词变化时才重置选中：新查询的结果集完全不同，按 id 锚定无意义。
+  // 普通刷新（新条目到达）不重置——selectedId 派生机制已保证选中项跟随。
   useEffect(() => {
-    setSelectedIndex(-1);
-  }, [items.length]);
+    setSelectedId(null);
+  }, [search]);
 
   // Auto-scroll selected item into view
   useEffect(() => {
@@ -753,10 +851,37 @@ function App() {
 
   const closeContextMenu = () => setContextMenu(null);
 
+  // 上下文菜单视口钳制：渲染后实测菜单尺寸再 clamp（此前用 180/220 固定值
+  // 估算，菜单项增减或字号变化就会失准）。useLayoutEffect 在绘制前跑，
+  // 第一帧先 visibility:hidden，测完定位，不会闪跳。
+  const contextMenuRef = useRef<HTMLDivElement>(null);
+  const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
+  useLayoutEffect(() => {
+    if (!contextMenu) {
+      setMenuPos(null);
+      return;
+    }
+    const el = contextMenuRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    setMenuPos({
+      x: Math.max(8, Math.min(contextMenu.x, window.innerWidth - rect.width - 8)),
+      y: Math.max(8, Math.min(contextMenu.y, window.innerHeight - rect.height - 8)),
+    });
+  }, [contextMenu]);
+
   // --- 传给被 memo 的 ItemCard 的回调，全部用 useCallback 稳定引用 ---
   // 任何一个回调每次渲染换新引用，都会让整列表的 memo 彻底失效。
 
-  const handleSelect = useCallback((index: number) => setSelectedIndex(index), []);
+  // itemsRef：让 handleSelect 摆脱对 visibleItems 的依赖（items 一变引用就变，
+  // 会打崩整列表 memo）。渲染期间同步，回调执行时读到最新列表。
+  // 注意用筛选后的列表：handleSelect 收到的 index 是渲染列表里的索引。
+  const itemsRef = useRef(visibleItems);
+  itemsRef.current = visibleItems;
+
+  const handleSelect = useCallback((index: number) => {
+    setSelectedId(itemsRef.current[index]?.id ?? null);
+  }, []);
 
   const handlePreview = useCallback((item: ClipboardItem) => {
     setPreviewItem(item);
@@ -768,6 +893,15 @@ function App() {
       .then(() => showToast(`已打开：${url}`, "success"))
       .catch((err) => showToast(friendlyError(err, "打开失败"), "error"));
   }, [showToast]);
+
+  // 附件双击：打开第一条路径所在的目录（CF_HDROP 内容每行一个路径）。
+  const handleOpenFilesLocation = useCallback((content: string) => {
+    const first = content.split("\n").map(s => s.trim()).find(Boolean);
+    if (!first) return;
+    const sepIdx = Math.max(first.lastIndexOf("\\"), first.lastIndexOf("/"));
+    const dir = sepIdx > 0 ? first.slice(0, sepIdx) : first;
+    void doOpenFile(dir);
+  }, [doOpenFile]);
 
   // handleDelete 来自 useClipboard，其 deps 含 [items]，items 一变引用就变
   // → 刷新一次列表就会让全列表 memo 失效。这里用 ref 包一层拿到永久稳定的
@@ -784,7 +918,7 @@ function App() {
     // Group items by date
     const groups: { label: string; items: { item: ClipboardItem; index: number }[] }[] = [];
     let currentGroup = "";
-    items.forEach((item, index) => {
+    visibleItems.forEach((item, index) => {
       const group = getDateGroup(item.timestamp);
       if (group !== currentGroup) {
         currentGroup = group;
@@ -793,7 +927,7 @@ function App() {
       groups[groups.length - 1].items.push({ item, index });
     });
     return groups;
-  }, [items]);
+  }, [visibleItems]);
 
   return (
     <div className="app">
@@ -810,6 +944,27 @@ function App() {
             autoFocus
           />
         </div>
+        {items.length > 0 && (
+          <div className="type-filter" role="tablist" aria-label="类型筛选">
+            {([
+              ["all", "全部"],
+              ["Text", "文本"],
+              ["Url", "链接"],
+              ["Image", "图片"],
+              ["Files", "附件"],
+            ] as const).map(([value, label]) => (
+              <button
+                key={value}
+                role="tab"
+                aria-selected={typeFilter === value}
+                className={`type-chip ${typeFilter === value ? "active" : ""}`}
+                onClick={() => setTypeFilter(value)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
         {items.length > 0 && (
           <button className="clear-btn" onClick={() => setClearConfirm(true)} title="清空所有">
             <IconTrash />
@@ -829,9 +984,30 @@ function App() {
 
       <div className="list-container">
         {items.length === 0 ? (
+          search.trim() ? (
+            // 搜索无结果与「真的没有历史」是两回事，文案必须区分，
+            // 并给一键清除搜索的出口（否则用户得手动全选删除搜索词）。
+            <div className="empty-state">
+              <p>无匹配结果</p>
+              <p className="hint">没有找到与「{search.trim()}」匹配的条目</p>
+              <button className="empty-action-btn" onClick={() => setSearch("")}>
+                清除搜索
+              </button>
+            </div>
+          ) : (
+            <div className="empty-state">
+              <p>暂无剪贴板内容</p>
+              <p className="hint">复制任意内容即可开始记录</p>
+            </div>
+          )
+        ) : visibleItems.length === 0 ? (
+          // 有历史但当前类型筛不出条目——给一键回到「全部」的出口。
           <div className="empty-state">
-            <p>暂无剪贴板内容</p>
-            <p className="hint">复制任意内容即可开始记录</p>
+            <p>该类型暂无条目</p>
+            <p className="hint">当前筛选：{typeFilter === "Files" ? "附件" : typeFilter === "Url" ? "链接" : typeFilter === "Image" ? "图片" : "文本"}</p>
+            <button className="empty-action-btn" onClick={() => setTypeFilter("all")}>
+              显示全部
+            </button>
           </div>
         ) : (
           <div className="item-list">
@@ -846,17 +1022,17 @@ function App() {
                     isSelected={index === selectedIndex}
                     isCopied={copiedId === item.id}
                     imageUrl={imageCache[item.id]}
+                    imageError={!!imageErrors[item.id]}
+                    onRetryImage={retryImage}
                     search={search}
-                    copyOnDoubleClick={config.copy_on_double_click !== false}
+                    onOpenUrl={handleOpenUrl}
                     onCopy={handleCopy}
                     onSelect={handleSelect}
                     onContextMenu={handleContextMenu}
                     onPreview={handlePreview}
                     onDelete={onDelete}
                     onOpenFile={handleOpenFile}
-                    onEnlargeImage={openEnlargedImage}
-                    onOpenUrl={handleOpenUrl}
-                  />
+                            />
                 ))}
               </div>
             ))}
@@ -937,6 +1113,7 @@ function App() {
           onMouseLeave={handleImageMouseUp}
         >
           <img
+            ref={enlargedImageRef}
             src={enlargedImage}
             alt="enlarged"
             className="image-modal-img"
@@ -948,11 +1125,8 @@ function App() {
             onMouseDown={handleImageMouseDown}
             onDoubleClick={(e) => {
               e.stopPropagation();
-              if (imageZoom !== 1 || imagePos.x !== 0 || imagePos.y !== 0) {
-                resetImageView();
-              } else {
-                closeEnlargedImage();
-              }
+              // 双击 = 适配 ↔ 100% 切换；关闭只走 Esc / 点击遮罩 / 控制条。
+              toggleImageFit();
             }}
           />
           <div className="image-modal-controls" onClick={(e) => e.stopPropagation()}>
@@ -960,6 +1134,7 @@ function App() {
             <button onClick={resetImageView} title="重置"><IconZoomReset /></button>
             <button onClick={() => setImageZoom((z) => Math.max(0.2, z - 0.25))} title="缩小"><IconZoomOut /></button>
             <span className="zoom-label">{Math.round(imageZoom * 100)}%</span>
+            <button onClick={closeEnlargedImage} title="关闭 (Esc)" className="image-modal-close"><IconX /></button>
           </div>
         </div>
       )}
@@ -985,46 +1160,37 @@ function App() {
       )}
 
       {execConfirm && (
-        <div className="modal-overlay" onClick={handleExecCancel}>
-          <div className="exec-confirm-dialog" onClick={(e) => e.stopPropagation()}>
-            <div className="exec-confirm-icon"><IconWarning /></div>
-            <h3 className="exec-confirm-title">检测到可执行文件</h3>
-            <p className="exec-confirm-desc">
-              你即将打开一个可能可执行的文件。运行未知脚本可能存在风险，是否继续？
-            </p>
-            <div className="exec-confirm-path" title={execConfirm.path}>
-              {execConfirm.path}
-            </div>
-            <div className="exec-confirm-buttons">
-              <button className="exec-btn-cancel" onClick={handleExecCancel}>
-                取消
-              </button>
-              <button className="exec-btn-open" onClick={handleExecConfirm}>
-                仍要打开
-              </button>
-            </div>
-          </div>
-        </div>
+        <ConfirmModal
+          open
+          icon={<IconWarning />}
+          title="检测到可执行文件"
+          message={
+            <>
+              <p className="exec-confirm-desc">
+                你即将打开一个可能可执行的文件。运行未知脚本可能存在风险，是否继续？
+              </p>
+              <div className="exec-confirm-path" title={execConfirm.path}>
+                {execConfirm.path}
+              </div>
+            </>
+          }
+          confirmText="仍要打开"
+          onConfirm={handleExecConfirm}
+          onCancel={handleExecCancel}
+        />
       )}
 
       {clearConfirm && (
-        <div className="modal-overlay" onClick={() => setClearConfirm(false)}>
-          <div className="exec-confirm-dialog" onClick={(e) => e.stopPropagation()}>
-            <div className="exec-confirm-icon"><IconTrash /></div>
-            <h3 className="exec-confirm-title">清空全部历史？</h3>
-            <p className="exec-confirm-desc">
-              将永久删除所有剪贴板历史记录，此操作不可撤销。
-            </p>
-            <div className="exec-confirm-buttons">
-              <button className="exec-btn-cancel" onClick={() => setClearConfirm(false)}>
-                取消
-              </button>
-              <button className="exec-btn-open" onClick={handleClear}>
-                全部清空
-              </button>
-            </div>
-          </div>
-        </div>
+        <ConfirmModal
+          open
+          icon={<IconTrash />}
+          title="清空全部历史？"
+          message="将永久删除所有剪贴板历史记录，此操作不可撤销。"
+          confirmText="全部清空"
+          confirmClass="exec-btn-open danger"
+          onConfirm={handleClear}
+          onCancel={() => setClearConfirm(false)}
+        />
       )}
 
       {undoToast && (
@@ -1040,8 +1206,14 @@ function App() {
         <>
           <div className="context-menu-overlay" onClick={closeContextMenu} onContextMenu={(e) => { e.preventDefault(); closeContextMenu(); }} />
           <div
+            ref={contextMenuRef}
             className="context-menu"
-            style={{ left: Math.min(contextMenu.x, window.innerWidth - 180), top: Math.min(contextMenu.y, window.innerHeight - 220) }}
+            style={{
+              // 首帧未测量时先放到触发点（visibility 由 CSS 控制？不——
+              // 这里用 menuPos 为 null 时隐藏在屏幕外，测量后跳到位）。
+              left: menuPos ? menuPos.x : -9999,
+              top: menuPos ? menuPos.y : -9999,
+            }}
           >
             <button className="ctx-item" onClick={() => { handleCopy(contextMenu.itemId); closeContextMenu(); }}>
               <IconCopy /> 复制
@@ -1055,6 +1227,36 @@ function App() {
                 <IconText /> 预览
               </button>
             )}
+            {/* 原双击动作归入右键（双击已移除）：图片预览 / URL 开浏览器 / 附件打开所在目录。 */}
+            {(() => {
+              const it = items.find(i => i.id === contextMenu.itemId);
+              if (!it) return null;
+              const type = it.type || "Text";
+              if (type === "Image") {
+                const url = imageCache[it.id];
+                if (!url) return null;
+                return (
+                  <button className="ctx-item" onClick={() => { closeContextMenu(); openEnlargedImage(url); }}>
+                    <IconImage /> 预览图片
+                  </button>
+                );
+              }
+              if (type === "Url") {
+                return (
+                  <button className="ctx-item" onClick={() => { closeContextMenu(); handleOpenUrl(it.content); }}>
+                    <IconGlobe /> 打开链接
+                  </button>
+                );
+              }
+              if (type === "Files") {
+                return (
+                  <button className="ctx-item" onClick={() => { closeContextMenu(); handleOpenFilesLocation(it.content); }}>
+                    <IconFolder /> 打开所在目录
+                  </button>
+                );
+              }
+              return null;
+            })()}
             {items.find(i => i.id === contextMenu.itemId) && (
               <button className="ctx-item" disabled={items.find(i => i.id === contextMenu.itemId)?.saved_as_note} onClick={async () => {
                 const id = contextMenu.itemId;

@@ -7,7 +7,7 @@
   background-color: var(--bg-primary);
   color: var(--text-primary);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", Roboto, sans-serif;
-  font-size: 13px;
+  font-size: var(--fs-md);
   overflow: hidden;
 }
 
@@ -15,9 +15,10 @@
 
 .tools-tabs {
   display: flex;
-  gap: 4px;
-  padding: 10px 16px 0;
+  gap: var(--sp-1);
+  padding: var(--sp-2) var(--sp-4) 0;
   background-color: var(--bg-secondary);
+  background-image: var(--brand-wash);
   border-bottom: 1px solid var(--border-color);
   flex-shrink: 0;
 }
@@ -25,12 +26,12 @@
 .tools-tab {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px 18px;
-  font-size: 13px;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4);
+  font-size: var(--fs-md);
   font-weight: 500;
   border: none;
-  border-radius: 8px 8px 0 0;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
@@ -71,7 +72,14 @@
 .tools-content {
   flex: 1;
   overflow-y: auto;
-  padding: 20px;
+  padding: var(--sp-4);
+}
+
+/* Tab 常驻挂载（见 ToolsApp 渲染处），用 hidden 属性切换可见性。
+   显式声明 display:none，防止未来给 .tools-pane 加 display 规则时
+   意外覆盖 hidden 的 UA 默认值。 */
+.tools-pane[hidden] {
+  display: none;
 }
 
 .tools-tab-content {
@@ -79,7 +87,7 @@
   margin: 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--sp-4);
 }
 
 /* ===== Card Sections ===== */
@@ -87,20 +95,20 @@
 .tools-section {
   background-color: var(--bg-secondary);
   border: 1px solid var(--border-color);
-  border-radius: 10px;
-  padding: 16px 18px;
+  border-radius: var(--radius-md);
+  padding: var(--sp-4) var(--sp-4);
 }
 
 .tools-section h3 {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-weight: 700;
   color: var(--text-secondary);
-  margin-bottom: 12px;
+  margin-bottom: var(--sp-3);
   text-transform: uppercase;
   letter-spacing: 0.6px;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--sp-2);
 }
 
 .tools-section h3::before {
@@ -117,8 +125,8 @@
 
 .tools-input {
   width: 100%;
-  padding: 9px 13px;
-  font-size: 13px;
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-md);
   font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
@@ -140,8 +148,8 @@
 
 .tools-textarea {
   width: 100%;
-  padding: 10px 13px;
-  font-size: 13px;
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-md);
   font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
@@ -164,14 +172,14 @@
 .tools-output-group {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--sp-1);
 }
 
 .tools-output-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 7px 12px;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
   background-color: var(--bg-tertiary);
   border-radius: var(--radius-sm);
   transition: background-color var(--dur-fast) var(--ease);
@@ -182,7 +190,7 @@
 }
 
 .tools-label {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   color: var(--text-secondary);
   min-width: 56px;
@@ -193,7 +201,7 @@
 
 .tools-code {
   font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
-  font-size: 13px;
+  font-size: var(--fs-md);
   color: var(--text-primary);
   flex: 1;
   overflow-x: auto;
@@ -201,17 +209,17 @@
 }
 
 .tools-sub {
-  font-size: 10px;
+  font-size: var(--fs-xs);
   color: var(--text-muted);
   flex-shrink: 0;
   font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
 }
 
 .copy-btn {
-  padding: 3px 10px;
-  font-size: 11px;
+  padding: 3px var(--sp-2);
+  font-size: var(--fs-xs);
   border: 1px solid var(--border-color);
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
@@ -232,9 +240,9 @@
 
 .tools-error {
   color: var(--red);
-  font-size: 13px;
-  margin-top: 8px;
-  padding: 6px 10px;
+  font-size: var(--fs-md);
+  margin-top: var(--sp-2);
+  padding: var(--sp-2) var(--sp-2);
   background-color: var(--danger-bg);
   border-radius: var(--radius-sm);
 }
@@ -247,9 +255,9 @@
   bottom: 48px;
   left: 50%;
   transform: translateX(-50%);
-  padding: 8px 18px;
+  padding: var(--sp-2) var(--sp-4);
   border-radius: var(--radius-md);
-  font-size: 13px;
+  font-size: var(--fs-md);
   font-weight: 500;
   z-index: 9999;
   max-width: 90%;
@@ -263,12 +271,12 @@
 
 .tools-toast-success {
   background: var(--green);
-  color: #fff;
+  color: var(--text-on-accent);
 }
 
 .tools-toast-error {
   background: var(--red);
-  color: #fff;
+  color: var(--text-on-accent);
 }
 
 @keyframes tools-toast-slide-in {
@@ -284,24 +292,51 @@
 
 .tools-hint {
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
+
+/* ── 间距/描述工具类（从 TSX 内联样式收敛，2026-10 UI 规范化） ──
+   只收编重复出现的组合；一次性布局仍允许内联。 */
+.tools-mt-1 { margin-top: var(--sp-1); }
+.tools-mt-2 { margin-top: var(--sp-2); }
+.tools-mb-2 { margin-bottom: var(--sp-2); }
+
+.tools-section-desc {
+  font-size: var(--fs-md);
+  opacity: 0.7;
+  margin-bottom: var(--sp-2);
+}
+
+.proxy-status-line {
+  font-size: var(--fs-md);
+  opacity: 0.8;
+}
+
+.tools-hint-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  cursor: pointer;
+}
+
+.tools-route-list { margin-top: var(--sp-3); }
+.tools-route-row { margin-bottom: var(--sp-1); }
 
 /* ===== Chips (shared presets) ===== */
 
 .cron-presets {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 12px;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
 }
 
 .cron-preset-btn {
-  padding: 5px 13px;
-  font-size: 11px;
+  padding: var(--sp-1) var(--sp-3);
+  font-size: var(--fs-xs);
   font-weight: 500;
   border: 1px solid var(--border-color);
-  border-radius: 20px;
+  border-radius: var(--radius-full);
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
@@ -319,13 +354,13 @@
 
 .cron-mode-switch {
   display: flex;
-  gap: 4px;
-  margin-bottom: 12px;
+  gap: var(--sp-1);
+  margin-bottom: var(--sp-3);
 }
 
 .cron-mode-btn {
-  padding: 6px 14px;
-  font-size: 11px;
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-xs);
   font-weight: 600;
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
@@ -342,25 +377,25 @@
 
 .cron-mode-btn.active {
   background-color: var(--accent);
-  color: var(--bg-primary);
+  color: var(--text-on-accent);
   border-color: var(--accent);
 }
 
 .cron-fields {
   display: flex;
-  gap: 10px;
-  margin-bottom: 4px;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-1);
 }
 
 .cron-field {
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: var(--sp-1);
 }
 
 .cron-field label {
-  font-size: 10px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   color: var(--text-muted);
   text-transform: uppercase;
@@ -370,20 +405,20 @@
 
 .cron-input {
   text-align: center;
-  padding: 8px 4px;
+  padding: var(--sp-2) var(--sp-1);
 }
 
 .cron-description {
-  font-size: 14px;
+  font-size: var(--fs-md);
   font-weight: 500;
-  padding: 10px 14px;
+  padding: var(--sp-2) var(--sp-3);
   background-color: var(--bg-tertiary);
   border-radius: var(--radius-md);
-  margin-bottom: 8px;
+  margin-bottom: var(--sp-2);
 }
 
 .cron-expression {
-  padding: 7px 12px;
+  padding: var(--sp-2) var(--sp-3);
   background-color: var(--bg-tertiary);
   border-radius: var(--radius-sm);
 }
@@ -393,12 +428,12 @@
 .regex-input-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-2);
 }
 
 .regex-slash {
   font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
-  font-size: 20px;
+  font-size: var(--fs-xl);
   color: var(--text-muted);
 }
 
@@ -412,20 +447,20 @@
 }
 
 .regex-flags-hint {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--text-muted);
-  margin-top: 8px;
+  margin-top: var(--sp-2);
   line-height: 1.5;
 }
 
 .regex-match-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--sp-2);
 }
 
 .regex-match-item {
-  padding: 8px 12px;
+  padding: var(--sp-2) var(--sp-3);
   background-color: var(--bg-tertiary);
   border-radius: var(--radius-sm);
   transition: background-color var(--dur-fast) var(--ease);
@@ -438,20 +473,20 @@
 .regex-match-header {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--sp-2);
 }
 
 .regex-groups {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 6px;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
 }
 
 .regex-group {
   font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
-  font-size: 11px;
-  padding: 2px 8px;
+  font-size: var(--fs-xs);
+  padding: 2px var(--sp-2);
   background-color: var(--bg-primary);
   border-radius: var(--radius-xs);
   color: var(--green);
@@ -459,9 +494,9 @@
 
 .regex-highlighted {
   font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
-  font-size: 13px;
+  font-size: var(--fs-md);
   line-height: 1.6;
-  padding: 12px 14px;
+  padding: var(--sp-3) var(--sp-3);
   background-color: var(--bg-tertiary);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
@@ -498,13 +533,13 @@
 .req-log-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-2);
   border-radius: var(--radius-sm);
   cursor: pointer;
   border: 1px solid transparent;
   font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   transition: background-color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
   /* 后端已把日志封顶 500 条（proxy.rs），但滚动容器只露出 ~8 行，其余仍要布局+绘制。
    * content-visibility: auto 让视口外的行跳过渲染工作。
@@ -534,8 +569,8 @@
 }
 
 .req-log-route {
-  font-size: 10px;
-  padding: 1px 6px;
+  font-size: var(--fs-xs);
+  padding: 1px var(--sp-2);
   border-radius: var(--radius-xs);
   background-color: var(--bg-tertiary);
   color: var(--text-secondary);
@@ -553,19 +588,19 @@
   min-width: 38px;
   text-align: center;
   font-weight: 700;
-  font-size: 11px;
-  padding: 1px 6px;
+  font-size: var(--fs-xs);
+  padding: 1px var(--sp-2);
   border-radius: var(--radius-xs);
 }
 
 .log-status.ok {
   color: var(--green);
-  background-color: rgba(158, 206, 106, 0.14);
+  background-color: var(--success-bg);
 }
 
 .log-status.warn {
   color: var(--orange);
-  background-color: rgba(224, 175, 104, 0.16);
+  background-color: var(--warn-bg);
 }
 
 .log-status.err {
@@ -577,7 +612,7 @@
 .log-method {
   min-width: 52px;
   font-weight: 600;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--text-secondary);
 }
 
@@ -602,7 +637,7 @@
   max-height: 120px;
   overflow-y: auto;
   font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 
 .activity-row {
@@ -619,7 +654,7 @@
 .log-modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.55);
+  background: var(--overlay-bg);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -643,8 +678,8 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 12px;
-  padding: 12px 16px;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
   border-bottom: 1px solid var(--border-color);
   flex-shrink: 0;
 }
@@ -652,10 +687,10 @@
 .log-modal-title {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--sp-2);
   min-width: 0;
   font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 
 .log-modal-title .log-url {
@@ -667,27 +702,27 @@
 
 .log-modal-actions {
   display: flex;
-  gap: 8px;
+  gap: var(--sp-2);
   flex-shrink: 0;
 }
 
 .log-modal-tabs {
   display: flex;
-  gap: 4px;
-  padding: 8px 16px 0;
+  gap: var(--sp-1);
+  padding: var(--sp-2) var(--sp-4) 0;
   border-bottom: 1px solid var(--border-color);
   flex-shrink: 0;
 }
 
 .log-modal-tab {
-  padding: 6px 14px;
-  font-size: 12px;
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm);
   font-weight: 500;
   border: none;
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
-  border-radius: 6px 6px 0 0;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
   position: relative;
 }
 
@@ -712,20 +747,20 @@
 }
 
 .log-modal-body {
-  padding: 14px 16px 18px;
+  padding: var(--sp-3) var(--sp-4) var(--sp-4);
   overflow-y: auto;
 }
 
 .log-block-title {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 12px;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
   font-weight: 600;
   color: var(--text-secondary);
   text-transform: uppercase;
   letter-spacing: 0.4px;
-  margin: 14px 0 6px;
+  margin: var(--sp-3) 0 var(--sp-2);
 }
 
 .log-block-title:first-child {
@@ -734,7 +769,7 @@
 
 .log-count {
   font-weight: 500;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--text-muted);
   text-transform: none;
   letter-spacing: 0;
@@ -749,10 +784,10 @@
 
 .hdr-row {
   display: flex;
-  gap: 10px;
-  padding: 5px 10px;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
   font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   border-bottom: 1px solid var(--border-color);
 }
 
@@ -781,14 +816,14 @@
 .kv-grid {
   display: grid;
   grid-template-columns: 96px 1fr;
-  gap: 8px 14px;
+  gap: var(--sp-2) var(--sp-3);
   align-items: baseline;
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 
 .kv-k {
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 
 .kv-v {
@@ -798,7 +833,7 @@
 
 .kv-v.mono {
   font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 
 .kv-v.breakable {
@@ -815,9 +850,9 @@
   background-color: var(--danger-bg);
   border: 1px solid var(--red);
   border-radius: var(--radius-md);
-  padding: 8px 10px;
-  font-size: 12px;
-  margin-bottom: 12px;
+  padding: var(--sp-2) var(--sp-2);
+  font-size: var(--fs-sm);
+  margin-bottom: var(--sp-3);
   font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
 }
 
@@ -826,8 +861,8 @@
 .proc-toolbar {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
   flex-wrap: wrap;
 }
 
@@ -841,8 +876,8 @@
 }
 
 .proc-switch-btn {
-  padding: 7px 14px;
-  font-size: 12px;
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm);
   border: none;
   background-color: var(--bg-primary);
   color: var(--text-secondary);
@@ -860,7 +895,7 @@
 
 .proc-switch-btn.active {
   background-color: var(--accent);
-  color: #fff;
+  color: var(--text-on-accent);
 }
 
 /* Let the filter absorb leftover width so the refresh button stays right-aligned. */
@@ -871,9 +906,9 @@
 }
 
 .proc-count {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--text-secondary);
-  margin-bottom: 6px;
+  margin-bottom: var(--sp-2);
 }
 
 /* Fixed-height scroll region: the process list runs to hundreds of rows and
@@ -888,7 +923,7 @@
 .proc-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 
 .proc-table thead th {
@@ -897,16 +932,16 @@
   z-index: 1;
   background-color: var(--bg-secondary);
   text-align: left;
-  padding: 8px 10px;
+  padding: var(--sp-2) var(--sp-2);
   font-weight: 600;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--text-secondary);
   border-bottom: 1px solid var(--border-color);
   white-space: nowrap;
 }
 
 .proc-table tbody td {
-  padding: 6px 10px;
+  padding: var(--sp-2) var(--sp-2);
   border-bottom: 1px solid var(--border-color);
   color: var(--text-primary);
   vertical-align: middle;
@@ -917,7 +952,7 @@
 }
 
 .proc-table tbody tr:hover {
-  background-color: var(--bg-hover, var(--bg-secondary));
+  background-color: var(--bg-hover));
 }
 
 .proc-mono {
@@ -931,13 +966,13 @@
 
 .proc-empty {
   text-align: center;
-  padding: 20px !important;
+  padding: var(--sp-4) !important;
   color: var(--text-secondary);
 }
 
 .proc-confirm {
   display: inline-flex;
-  gap: 4px;
+  gap: var(--sp-1);
   white-space: nowrap;
 }
 
@@ -972,9 +1007,9 @@ select:focus-visible,
   background: var(--danger-bg);
   border: 1px solid var(--red);
   border-radius: var(--radius-sm);
-  padding: 8px 12px;
-  margin-top: 8px;
-  font-size: 13px;
+  padding: var(--sp-2) var(--sp-3);
+  margin-top: var(--sp-2);
+  font-size: var(--fs-md);
   white-space: pre-wrap;
   line-height: 1.5;
 }
@@ -982,20 +1017,20 @@ select:focus-visible,
 /* 日志筛选栏容器 */
 .proxy-log-filter {
   display: flex;
-  gap: 8px;
+  gap: var(--sp-2);
   flex-wrap: wrap;
   align-items: center;
-  margin-bottom: 8px;
+  margin-bottom: var(--sp-2);
 }
 
 /* 筛选下拉框 */
 .proxy-filter-select {
-  padding: 4px 8px;
+  padding: var(--sp-1) var(--sp-2);
   background: var(--bg-primary);
   color: inherit;
   border: 1px solid var(--border-color);
   border-radius: var(--radius-xs);
-  font-size: 13px;
+  font-size: var(--fs-md);
   font-family: inherit;
 }
 
@@ -1012,7 +1047,7 @@ select:focus-visible,
 .proc-sortable::after {
   content: " ↕";
   opacity: 0.3;
-  font-size: 11px;
+  font-size: var(--fs-xs);
 }
 .proc-sortable.proc-sort-asc::after {
   content: " ↑";
@@ -1029,7 +1064,7 @@ select:focus-visible,
   font-weight: 500;
 }
 .proc-state-warn {
-  color: #e6b800;
+  color: var(--warn-text);
 }
 .proc-state-err {
   color: var(--red);
@@ -1037,8 +1072,8 @@ select:focus-visible,
 
 /* 小号操作按钮 */
 .proc-action-btn {
-  padding: 1px 6px;
-  font-size: 12px;
+  padding: 1px var(--sp-2);
+  font-size: var(--fs-sm);
   background: transparent;
   border: 1px solid var(--border-color);
   border-radius: 3px;
@@ -1055,9 +1090,9 @@ select:focus-visible,
 .proc-group-header {
   font-weight: 600;
   background: var(--bg-tertiary);
-  padding: 4px 8px;
-  font-size: 13px;
-  margin-top: 4px;
+  padding: var(--sp-1) var(--sp-2);
+  font-size: var(--fs-md);
+  margin-top: var(--sp-1);
   border-radius: 3px;
 }
 
@@ -1073,23 +1108,23 @@ select:focus-visible,
 .proc-auto-refresh {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 4px 0;
+  gap: var(--sp-2);
+  padding: var(--sp-1) 0;
 }
 .proc-auto-refresh label {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--sp-1);
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 .proc-auto-refresh select {
-  padding: 2px 6px;
+  padding: 2px var(--sp-2);
   background: var(--bg-primary);
   color: inherit;
   border: 1px solid var(--border-color);
   border-radius: 3px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 
 /* 批量操作栏 */
@@ -1098,28 +1133,28 @@ select:focus-visible,
   bottom: 0;
   background: var(--bg-secondary);
   border-top: 1px solid var(--border-color);
-  padding: 8px 12px;
+  padding: var(--sp-2) var(--sp-3);
   display: flex;
   align-items: center;
-  gap: 10px;
-  font-size: 13px;
+  gap: var(--sp-2);
+  font-size: var(--fs-md);
   z-index: 10;
 }
 .proc-batch-bar .copy-btn {
-  font-size: 12px;
-  padding: 3px 10px;
+  font-size: var(--fs-sm);
+  padding: 3px var(--sp-2);
 }
 
 /* ===== 通用工具按钮（修复已知缺失） ===== */
 
 .tools-btn {
-  padding: 6px 16px;
+  padding: var(--sp-2) var(--sp-4);
   background: var(--accent);
-  color: #fff;
+  color: var(--text-on-accent);
   border: none;
   border-radius: var(--radius-xs);
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 .tools-btn:hover {
   opacity: 0.9;
@@ -1133,7 +1168,7 @@ select:focus-visible,
 
 .ip-query-row {
   display: flex;
-  gap: 8px;
+  gap: var(--sp-2);
   align-items: center;
   flex-wrap: wrap;
 }

@@ -297,8 +297,39 @@ impl ApiStore {
             .collect();
         let expanded_headers = merge_env_headers(&env_headers, &own_headers);
 
-        let method = Method::from_bytes(req.method.to_uppercase().as_bytes())
-            .unwrap_or(Method::GET);
+        // Which header names will the declarative auth write? Bearer/Basic
+        // always write `Authorization`; an API Key writes its (expanded) key
+        // name unless it targets the query string. Hand-written headers with
+        // those names are dropped below — reqwest's `.header()` appends
+        // rather than replaces, so letting both through would put two
+        // Authorization headers (or two of the same API-key header) on the
+        // wire, and most servers silently honour only the first.
+        let auth_header_names: Vec<String> = match &req.auth {
+            ApiAuth::None => Vec::new(),
+            ApiAuth::Bearer { .. } | ApiAuth::Basic { .. } => {
+                vec!["authorization".to_string()]
+            }
+            ApiAuth::ApiKey { key, location, .. } => {
+                if location == "query" {
+                    Vec::new()
+                } else {
+                    let k = expand_placeholders(key, &vars);
+                    if k.trim().is_empty() { Vec::new() } else { vec![k] }
+                }
+            }
+        };
+        let (expanded_headers, shadowed_headers) =
+            strip_auth_shadowed_headers(expanded_headers, &auth_header_names);
+        for name in &shadowed_headers {
+            warnings.push(format!(
+                "请求头 {name} 与 Auth 标签页的认证配置冲突，已被 Auth 配置覆盖"
+            ));
+        }
+
+        let method = match resolve_method(&req.method) {
+            Ok(m) => m,
+            Err(msg) => return error_response(started, msg, warnings),
+        };
 
         let timeout = Duration::from_secs(req.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS).max(1));
         let redirect_policy = if req.follow_redirects {
@@ -494,7 +525,10 @@ impl ApiStore {
                         // A read failure used to be swallowed by `if let Ok`,
                         // so the request went out *missing the part* and the
                         // user saw an inexplicable 400 from the server.
-                        let bytes = match fs::read(path) {
+                        // Async read: `execute` runs on a tokio worker, and a
+                        // synchronous `fs::read` on a large upload would pin
+                        // that worker for the whole duration of the read.
+                        let bytes = match tokio::fs::read(path).await {
                             Ok(b) => b,
                             Err(e) => {
                                 return error_response(
@@ -545,7 +579,7 @@ impl ApiStore {
                         );
                     }
                 };
-                let bytes = match fs::read(path) {
+                let bytes = match tokio::fs::read(path).await {
                     Ok(b) => b,
                     Err(e) => {
                         return error_response(
@@ -665,7 +699,17 @@ impl ApiStore {
         let headers: Vec<(String, String)> = response
             .headers()
             .iter()
-            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+            .map(|(k, v)| {
+                (
+                    k.to_string(),
+                    // Non-UTF8 header values are legal on the wire; render
+                    // them lossily rather than silently blanking the row
+                    // (mirrors how `sent_headers` handles the same case).
+                    v.to_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|_| String::from_utf8_lossy(v.as_bytes()).into_owned()),
+                )
+            })
             .collect();
         let final_url = {
             let u = response.url().to_string();
@@ -777,9 +821,38 @@ impl ApiStore {
     ///
     /// `Jar` exposes no clear API, so we replace the whole thing. Held behind
     /// a `Mutex` because the client builder clones the `Arc` per request.
+    ///
+    /// The client cache must be evicted too: each cached `Client` bound the
+    /// *old* jar's `Arc` at build time (`cookie_provider`), so without this
+    /// the very next send would silently re-attach every cookie we just
+    /// cleared — the button would look broken while `cookies_for` (which
+    /// reads the fresh jar) reported an empty jar.
     pub fn clear_cookies(&self) {
         *self.cookie_jar_slot.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(Jar::default());
+        self.clients
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
+}
+
+/// Resolve the stored method string into an HTTP method.
+///
+/// An empty string (the serde default on legacy rows) means GET. Any valid
+/// HTTP token is accepted as-is — extension methods like WebDAV's PROPFIND
+/// are legal, so "unknown" does not mean invalid. What `Method::from_bytes`
+/// *does* refuse are non-token strings (`"GET POST"`, `"GET/POST"`, non-ASCII
+/// text); the old `unwrap_or(Method::GET)` silently turned those into a GET,
+/// which can hit a completely different handler on the server — the worst
+/// kind of surprise for a debugging tool whose whole job is to show what
+/// actually went out.
+fn resolve_method(raw: &str) -> Result<Method, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(Method::GET);
+    }
+    Method::from_bytes(trimmed.to_uppercase().as_bytes())
+        .map_err(|_| format!("无效的 HTTP 方法: {raw}（可用 GET / POST / PUT / DELETE / PATCH / HEAD / OPTIONS 等）"))
 }
 
 fn error_response(started: Instant, msg: String, warnings: Vec<String>) -> ApiResponse {
@@ -862,6 +935,15 @@ fn substitute_path_vars(url: &str, path_vars: &[(String, String)]) -> String {
         // An empty key would make the needle a bare `:`, matching every colon
         // in the URL (including the scheme separator).
         if k.is_empty() {
+            continue;
+        }
+        // An empty value means "not filled in yet": the front-end sends
+        // `[name, ""]` for every placeholder the user hasn't given a value
+        // (see `sendRequest` in ApiApp.tsx), with the contract that the
+        // placeholder stays literal. Substituting the empty string would
+        // silently rewrite `/api/:id/profile` into `/api//profile` — a
+        // different route on the server, with no hint in the UI about why.
+        if v.is_empty() {
             continue;
         }
         let needle = format!(":{k}");
@@ -1016,6 +1098,38 @@ fn merge_env_headers(
     out
 }
 
+/// Drop hand-written headers that the declarative auth would also write.
+///
+/// reqwest's `RequestBuilder::header()` **appends** rather than replaces, so
+/// a hand-written `Authorization` plus an Auth-tab Bearer token used to put
+/// *two* `Authorization` headers on the wire — undefined behaviour for most
+/// servers (typically the first one wins, silently discarding the token the
+/// user just configured in the Auth tab). The Auth tab selection is the more
+/// recent, more deliberate choice, so it wins: the shadowed hand-written
+/// headers are removed and returned so the caller can surface a warning.
+///
+/// Returns `(kept_headers, dropped_names)` preserving the original order.
+fn strip_auth_shadowed_headers(
+    headers: Vec<(String, String)>,
+    auth_names: &[String],
+) -> (Vec<(String, String)>, Vec<String>) {
+    if auth_names.is_empty() {
+        return (headers, Vec::new());
+    }
+    let mut dropped: Vec<String> = Vec::new();
+    let kept: Vec<(String, String)> = headers
+        .into_iter()
+        .filter(|(k, _)| {
+            let shadowed = auth_names.iter().any(|n| n.eq_ignore_ascii_case(k));
+            if shadowed {
+                dropped.push(k.clone());
+            }
+            !shadowed
+        })
+        .collect();
+    (kept, dropped)
+}
+
 /// Join an environment base URL with a request URL.
 ///
 /// Absolute request URLs (`http://`, `https://`) win outright — an explicit
@@ -1043,7 +1157,8 @@ fn join_base_url(base: &str, url: &str) -> String {
     format!("{}/{}", base.trim_end_matches('/'), url.trim_start_matches('/'))
 }
 
-fn find_close(bytes: &[u8]) -> Option<usize> {    let mut i = 0;
+fn find_close(bytes: &[u8]) -> Option<usize> {
+    let mut i = 0;
     while i + 1 < bytes.len() {
         if bytes[i] == b'}' && bytes[i + 1] == b'}' {
             return Some(i);
@@ -1135,14 +1250,26 @@ pub async fn api_clear_cookies(store: tauri::State<'_, Arc<ApiStore>>) -> Result
     Ok(())
 }
 
+/// Windows-reserved device names. A file called `CON` or `NUL.txt` does not
+/// land on disk as a regular file — the name resolves to a device, so the
+/// write either vanishes into the console or fails in confusing ways. The
+/// reserved check applies to the stem (before the first dot) and is
+/// case-insensitive; suffixing with `_` is what Explorer itself does when
+/// it has to materialize such a name.
+const WINDOWS_RESERVED_NAMES: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL",
+    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
 /// Strip everything that could redirect the write outside the target folder.
 ///
 /// `Content-Disposition` is attacker-controlled: a server can answer with
 /// `filename="../../autorun.inf"`. We only ever want the final component, so
 /// take the segment after the last separator and drop the characters Windows
-/// rejects in file names. Reserved device names (CON, PRN, ...) would still be
-/// refused by the OS, but they can't escape the directory, so a failed write is
-/// an acceptable outcome there.
+/// rejects in file names. Reserved device names (CON, PRN, ...) get a `_`
+/// suffix rather than being left as-is: writing them does not simply fail,
+/// the name resolves to a device instead of a file.
 fn sanitize_filename(raw: &str) -> Option<String> {
     let last = raw
         .rsplit(|c| c == '/' || c == '\\' || c == ':')
@@ -1157,6 +1284,10 @@ fn sanitize_filename(raw: &str) -> Option<String> {
     if trimmed.is_empty() {
         None
     } else {
+        let stem = trimmed.split('.').next().unwrap_or("");
+        if WINDOWS_RESERVED_NAMES.iter().any(|r| r.eq_ignore_ascii_case(stem)) {
+            return Some(format!("_{trimmed}"));
+        }
         Some(trimmed.to_string())
     }
 }
@@ -1493,6 +1624,63 @@ mod tests {
         assert_eq!(merge_env_headers(&[], &own), own);
     }
 
+    // ── auth vs hand-written headers ───────────────────────────
+    // reqwest's `.header()` appends rather than replaces, so a hand-written
+    // Authorization plus an Auth-tab Bearer token used to put two
+    // Authorization headers on the wire (servers typically honour only the
+    // first — silently discarding the token the user just configured).
+
+    #[test]
+    fn strip_auth_shadowed_headers_removes_case_insensitive_matches() {
+        let (kept, dropped) = strip_auth_shadowed_headers(
+            hs(&[("Authorization", "Bearer old"), ("Accept", "*/*")]),
+            &["authorization".to_string()],
+        );
+        assert_eq!(kept, hs(&[("Accept", "*/*")]));
+        assert_eq!(dropped, vec!["Authorization".to_string()]);
+    }
+
+    #[test]
+    fn strip_auth_shadowed_headers_keeps_everything_when_auth_writes_nothing() {
+        // Auth "None" writes no header at all: a hand-written Authorization
+        // must survive untouched (that's the documented ApiAuth::None
+        // contract in models.rs).
+        let own = hs(&[("Authorization", "Bearer old"), ("Accept", "*/*")]);
+        let (kept, dropped) = strip_auth_shadowed_headers(own.clone(), &[]);
+        assert_eq!(kept, own);
+        assert!(dropped.is_empty());
+    }
+
+    // ── method resolution ──────────────────────────────────────
+
+    #[test]
+    fn resolve_method_accepts_common_verbs_case_insensitively() {
+        assert_eq!(resolve_method("get").unwrap(), Method::GET);
+        assert_eq!(resolve_method("POST").unwrap(), Method::POST);
+        assert_eq!(resolve_method(" delete ").unwrap(), Method::DELETE);
+    }
+
+    #[test]
+    fn resolve_method_maps_empty_to_get() {
+        // The serde default on legacy rows is an empty string; that must
+        // keep meaning GET rather than start failing after the fix.
+        assert_eq!(resolve_method("").unwrap(), Method::GET);
+        assert_eq!(resolve_method("   ").unwrap(), Method::GET);
+    }
+
+    #[test]
+    fn resolve_method_rejects_malformed_tokens_instead_of_downgrading_to_get() {
+        // `Method::from_bytes` accepts any valid HTTP token (extension
+        // methods like PROPFIND are legal), so "FOOBAR" is NOT an error.
+        // What it refuses are non-token strings — and those used to become
+        // a silent GET, a completely different handler on the server.
+        assert!(resolve_method("GET POST").is_err()); // space
+        assert!(resolve_method("GET/POST").is_err()); // slash
+        assert!(resolve_method("获取").is_err()); // non-token characters
+        // Extension methods stay legal.
+        assert!(resolve_method("PROPFIND").is_ok());
+    }
+
     // ── per-request env binding ────────────────────────────────
     // Envs bind per request via `ApiRequest::env_id`; there is no global
     // "active env". These pin the three resolution outcomes.
@@ -1561,6 +1749,36 @@ mod tests {
         assert_eq!(prod.base_url, "https://prod.test");
         assert_eq!(prod.headers, hs(&[("X-Env", "prod")]));
         assert_eq!(prod.vars.get("token").map(String::as_str), Some("zzz"));
+    }
+
+    #[test]
+    fn clear_cookies_evicts_cached_clients() {
+        // Cached clients hold an `Arc` to the jar they were built with.
+        // Clearing the jar without evicting the cache let the very next
+        // send silently re-attach every cookie that had just been cleared,
+        // while `cookies_for` (reading the fresh jar) reported an empty
+        // jar — the button looked broken in the most confusing way.
+        let store = ApiStore::new(None);
+        store
+            .clients
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert((false, true), reqwest::Client::new());
+        assert!(
+            !store
+                .clients
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty()
+        );
+        store.clear_cookies();
+        assert!(
+            store
+                .clients
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty()
+        );
     }
 
     // ── env base URL joining ───────────────────────────────────
@@ -1644,6 +1862,19 @@ mod tests {
         );
         // Control characters (including the NUL truncation trick) are removed.
         assert_eq!(sanitize_filename("a\u{0}b.bin").as_deref(), Some("ab.bin"));
+    }
+
+    #[test]
+    fn sanitize_filename_neuters_windows_reserved_device_names() {
+        // Writing "CON" or "nul.txt" does not create a regular file — the
+        // name resolves to a device. A `_` suffix (what Explorer itself
+        // does) keeps the name recognisable while making it writable.
+        assert_eq!(sanitize_filename("CON").as_deref(), Some("_CON"));
+        assert_eq!(sanitize_filename("nul.txt").as_deref(), Some("_nul.txt"));
+        assert_eq!(sanitize_filename("Com1.zip").as_deref(), Some("_Com1.zip"));
+        // Ordinary names that merely contain a reserved word are untouched.
+        assert_eq!(sanitize_filename("console.log").as_deref(), Some("console.log"));
+        assert_eq!(sanitize_filename("report.pdf").as_deref(), Some("report.pdf"));
     }
 
     #[test]
@@ -1989,6 +2220,17 @@ mod tests {
         let url = "https://api.example.com:8080/v1/users";
         let got = subst(url, &[("", "X")]);
         assert_eq!(got, url);
+    }
+
+    #[test]
+    fn substitute_keeps_placeholder_when_value_is_empty() {
+        // The front-end sends `[name, ""]` for every placeholder the user
+        // has not filled in (see `sendRequest` in ApiApp.tsx), with the
+        // contract that the placeholder stays literal. Substituting the
+        // empty string used to rewrite `/api/:id/profile` into
+        // `/api//profile` — a different route on the server, with no hint
+        // in the UI about why the request 404'd.
+        assert_eq!(subst("/api/:id/profile", &[("id", "")]), "/api/:id/profile");
     }
 
     #[test]

@@ -428,6 +428,8 @@ function CronTab() {
   const [mode, setMode] = useState<CronMode>("5field");
   const cfg = CRON_CONFIGS[mode];
   const [fields, setFields] = useState<string[]>(cfg.presets[0][1]);
+  // 与其他 Tab 共用同一套 toast：复制成功/失败反馈样式一致。
+  const { toast, showToast } = useToast();
 
   const valid = useMemo(() => {
     const ranges = CRON_CONFIGS[mode].ranges;
@@ -446,6 +448,18 @@ function CronTab() {
   }, [fields, valid, mode]);
 
   const switchMode = (m: CronMode) => {
+    if (m === mode) return;
+    // 表达式合法时尽量保留用户输入：5→6 在头部补秒位 "0"（Quartz 语义等价，
+    // 每天 9:00 → 每天 9:00:00），6→5 去掉秒位；表达式不合法（含编辑中的
+    // 中间态）才回退到该模式的默认预设，不再无条件覆盖用户自定义表达式。
+    if (valid && fields.length === CRON_CONFIGS[mode].ranges.length) {
+      const carried = m === "6field" ? ["0", ...fields] : fields.slice(1);
+      if (carried.length === CRON_CONFIGS[m].ranges.length) {
+        setMode(m);
+        setFields(carried);
+        return;
+      }
+    }
     setMode(m);
     setFields(CRON_CONFIGS[m].presets[0][1]);
   };
@@ -507,6 +521,19 @@ function CronTab() {
           <code className="tools-code">
             {fields.join(" ")}
           </code>
+          <button
+            className="copy-btn"
+            onClick={async () => {
+              try {
+                await navigator.clipboard.writeText(fields.join(" "));
+                showToast("已复制");
+              } catch (e) {
+                showToast(friendlyError(e, "复制失败"), "error");
+              }
+            }}
+          >
+            复制
+          </button>
         </div>
       </div>
 
@@ -526,6 +553,7 @@ function CronTab() {
             ))}
           </div>
         )}
+        {toast && <div className={`tools-toast tools-toast-${toast.type}`}>{toast.msg}</div>}
       </div>
     </div>
   );
@@ -1013,8 +1041,8 @@ function ProxyTab({
           />
           <button className={isRunning ? "stop-btn" : "start-btn"} onClick={toggleServer}>{isRunning ? "停止代理" : "启动代理"}</button>
         </div>
-        <p style={{ marginTop: "8px", fontSize: "13px", opacity: 0.8 }}>状态：{isRunning ? "运行中" : "已停止"}</p>
-        <label className="tools-hint" style={{ display: "flex", alignItems: "center", gap: "6px", marginTop: "8px", cursor: isRunning ? "not-allowed" : "pointer" }} title={isRunning ? "请先停止代理再修改此设置" : ""}>
+        <p className="proxy-status-line tools-mt-2">状态：{isRunning ? "运行中" : "已停止"}</p>
+        <label className="tools-hint tools-hint-row tools-mt-2" style={{ cursor: isRunning ? "not-allowed" : "pointer" }} title={isRunning ? "请先停止代理再修改此设置" : ""}>
           <input
             type="checkbox"
             checked={allowLan}
@@ -1024,7 +1052,7 @@ function ProxyTab({
           允许局域网访问
         </label>
         {allowLan && (
-          <p className="tools-hint" style={{ marginTop: "4px" }}>
+          <p className="tools-hint tools-mt-1">
             其他设备可通过 http://&lt;本机IP&gt;:{port} 访问
           </p>
         )}
@@ -1032,7 +1060,7 @@ function ProxyTab({
       </div>
       <div className="tools-section">
         <h3>默认目标</h3>
-        <p style={{ fontSize: "13px", opacity: 0.7, marginBottom: "6px" }}>
+        <p className="tools-section-desc">
           未匹配下方任何规则的请求将转发到此地址。
         </p>
         <input
@@ -1045,7 +1073,7 @@ function ProxyTab({
       </div>
       <div className="tools-section">
         <h3>转发规则</h3>
-        <p style={{ fontSize: "13px", opacity: 0.7, marginBottom: "6px" }}>
+        <p className="tools-section-desc">
           请求路径以此前缀开头时，将转发到对应目标（nginx 风格前缀匹配）。
         </p>
         <div className="ip-query-row">
@@ -1053,9 +1081,9 @@ function ProxyTab({
           <input className="tools-input" placeholder="目标，例如 http://localhost:3000" value={newTarget} onChange={(e) => setNewTarget(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addRoute(); }} />
           <button onClick={addRoute}>添加规则</button>
         </div>
-        <div style={{ marginTop: "12px" }}>
+        <div className="tools-route-list">
           {routes.map((route) => (
-            <div key={route.id} className="tools-output-row" style={{ marginBottom: "4px", opacity: route.enabled ? 1 : 0.5 }}>
+            <div key={route.id} className="tools-output-row tools-route-row" style={{ opacity: route.enabled ? 1 : 0.5 }}>
               {editingId === route.id ? (
                 <>
                   <input
@@ -1096,7 +1124,7 @@ function ProxyTab({
       </div>
       <div className="tools-section">
         <h3>请求日志</h3>
-        <p className="tools-hint" style={{ marginBottom: "6px" }}>
+        <p className="tools-hint tools-mb-2">
           点击一条请求可查看完整的请求与响应详情。
         </p>
         <div className="proxy-log-filter">
@@ -1154,8 +1182,8 @@ function ProxyTab({
         </div>
         {requestLogs.length > 0 && (
           <button
-            className="copy-btn"
-            style={{ marginTop: "8px" }}
+            className="copy-btn tools-mt-2"
+
             onClick={async () => {
               try {
                 await invoke("clear_proxy_logs");
@@ -1334,7 +1362,7 @@ function ProxyLogDetail({ log, onClose }: { log: ProxyLog; onClose: () => void }
   );
 }
 
-function IpTab() {
+function IpTab({ active }: { active: boolean }) {
   const [myIp, setMyIp] = useState("");
   const [myIpError, setMyIpError] = useState<string | null>(null);
   const [queryInput, setQueryInput] = useState("");
@@ -1361,9 +1389,12 @@ function IpTab() {
     }
   }, []);
 
+  // Tab 常驻挂载后改为「切到本 Tab 才拉取」，与旧版卸载/重挂载的时机一致：
+  // 不在应用启动时就发外部 IP 查询请求，每次切回也刷新一次。
   useEffect(() => {
+    if (!active) return;
     void loadMyIp();
-  }, [loadMyIp]);
+  }, [loadMyIp, active]);
 
   const copy = async (text: string) => {
     try {
@@ -1507,7 +1538,7 @@ function cmpNullableNum(a: number | null, b: number | null, sign: number): numbe
   return (a - b) * sign;
 }
 
-function ProcessTab() {
+function ProcessTab({ active }: { active: boolean }) {
   const [view, setView] = useState<ProcView>("ports");
   const [ports, setPorts] = useState<PortInfo[]>([]);
   const [procs, setProcs] = useState<ProcessInfo[]>([]);
@@ -1561,8 +1592,9 @@ function ProcessTab() {
   }, [view]);
 
   useEffect(() => {
+    if (!active) return;
     void refresh();
-  }, [refresh]);
+  }, [refresh, active]);
 
   // 切换视图 / 切换分组时清空选择：选中的 PID 在新列表里可能根本不存在。
   useEffect(() => {
@@ -1570,14 +1602,16 @@ function ProcessTab() {
     setPendingBatch(false);
   }, [view, groupByProc]);
 
-  // 自动刷新：只有开启时才创建 interval，关闭/卸载即清理。
+  // 自动刷新：只有开启且当前 Tab 可见时才创建 interval，关闭/切走/卸载即清理。
   // 有行处于待确认（单行或批量）时暂停，否则确认按钮会被刷新掉。
+  // Tab 常驻挂载后（见 ToolsApp 渲染处），非当前 Tab 必须停掉轮询，
+  // 否则切去别的工具后仍在后台按周期拉进程列表。
   const paused = pendingKill !== null || pendingBatch;
   useEffect(() => {
-    if (!autoRefresh || paused) return;
+    if (!active || !autoRefresh || paused) return;
     const id = setInterval(() => { void refresh(true); }, autoMs);
     return () => clearInterval(id);
-  }, [autoRefresh, autoMs, paused, refresh]);
+  }, [active, autoRefresh, autoMs, paused, refresh]);
 
   const kill = useCallback(
     async (pid: number, label: string, force: boolean) => {
@@ -2086,9 +2120,9 @@ export default function ToolsApp() {
     };
   }, []);
 
-  // Sync proxy state from backend whenever the proxy tab is shown
-  // (after switching away and back, the component gets remounted, so we
-  // refresh from the real backend state).
+  // Sync proxy state from backend whenever the proxy tab is shown.
+  // Tabs stay mounted (hidden via CSS), so ProxyTab's own mount-sync only
+  // runs once at startup — this effect keeps the panel fresh on every visit.
   useEffect(() => {
     if (tab !== "proxy") return;
     (async () => {
@@ -2123,14 +2157,28 @@ export default function ToolsApp() {
         ))}
       </div>
       <div className="tools-content">
-        {tab === "timestamp" && <TimestampTab visible={visible} />}
-        {tab === "cron" && <CronTab />}
-        {tab === "regex" && <RegexTab />}
-        {tab === "ip" && <IpTab />}
-        {tab === "proxy" && (
+        {/* 各 Tab 常驻挂载，仅用 hidden 切换可见性：切 Tab 不再丢输入
+            （正则 pattern/测试串、Cron 字段、IP 输入、代理规则表单）。
+            需要感知可见性的副作用各自门控：Timestamp/Proxy 的轮询看窗口
+            visible，IpTab 拉取与 ProcessTab 刷新/轮询看本 Tab 的 active。 */}
+        <div className="tools-pane" hidden={tab !== "timestamp"}>
+          <TimestampTab visible={visible} />
+        </div>
+        <div className="tools-pane" hidden={tab !== "cron"}>
+          <CronTab />
+        </div>
+        <div className="tools-pane" hidden={tab !== "regex"}>
+          <RegexTab />
+        </div>
+        <div className="tools-pane" hidden={tab !== "ip"}>
+          <IpTab active={tab === "ip"} />
+        </div>
+        <div className="tools-pane" hidden={tab !== "proxy"}>
           <ProxyTab state={proxyState} setState={setProxyState} visible={visible} />
-        )}
-        {tab === "process" && <ProcessTab />}
+        </div>
+        <div className="tools-pane" hidden={tab !== "process"}>
+          <ProcessTab active={tab === "process"} />
+        </div>
       </div>
     </div>
   );

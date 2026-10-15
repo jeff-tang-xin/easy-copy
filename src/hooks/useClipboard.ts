@@ -22,7 +22,10 @@ import type { UseToastReturn } from "./useToast";
 
 export interface ClipboardItem {
   id: string;
-  type: "Text" | "Image" | "Files";
+  /** Payload kind. `Url` is a bare single-line URL (classified by the
+   * backend at insert time; legacy Text entries are re-classified on
+   * load). `Files` = copied file paths (the "附件" category). */
+  type: "Text" | "Url" | "Image" | "Files";
   content: string;
   timestamp: string;
   favorite: boolean;
@@ -39,6 +42,8 @@ export interface AppConfig {
   screenshot_shortcut: string;
   api_shortcut: string;
   copy_on_double_click: boolean;
+  /** 复制后自动隐藏主窗口。后端 serde default = true，见 models.rs。 */
+  auto_hide_on_copy: boolean;
   storage_root: string | null;
 }
 
@@ -54,6 +59,11 @@ export interface ClipboardStats {
 export interface UseClipboardOptions {
   /** Toast helper for surfacing errors & info messages. */
   showToast: UseToastReturn["showToast"];
+  /**
+   * 复制成功后是否自动隐藏窗口（对应设置项 auto_hide_on_copy，默认开）。
+   * 通过 ref 读取，调用方传最新值即可，不要求引用稳定。
+   */
+  autoHideOnCopy?: boolean;
 }
 
 export interface UseClipboardReturn {
@@ -62,6 +72,10 @@ export interface UseClipboardReturn {
   setSearch: (v: string) => void;
   copiedId: string | null;
   imageCache: ImageCache;
+  /** 加载失败的图片 id 集合（卡片据此渲染错误占位 + 重试按钮）。 */
+  imageErrors: ImageCache;
+  /** 清除某张图的失败标记并重新加载。 */
+  retryImage: (id: string) => void;
   stats: ClipboardStats;
   incognito: boolean;
   /** Refresh the list from the backend (also reloads images + stats). */
@@ -80,14 +94,23 @@ export interface UseClipboardReturn {
   getAllTags: () => Promise<string[]>;
 }
 
-export function useClipboard({ showToast }: UseClipboardOptions): UseClipboardReturn {
+export function useClipboard({ showToast, autoHideOnCopy }: UseClipboardOptions): UseClipboardReturn {
   const [items, setItems] = useState<ClipboardItem[]>([]);
   const [search, setSearch] = useState("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [imageCache, setImageCache] = useState<ImageCache>({});
   const imageCacheRef = useRef<ImageCache>({});
+  // 图片加载失败集合：与 imageCache 同构（id → true）。失败不再逐条 toast
+  // 轰炸（一次刷新可能带出几十张图），改为卡片内错误占位 + 重试。
+  const [imageErrors, setImageErrors] = useState<ImageCache>({});
+  const imageErrorToastedRef = useRef(false);
   const [stats, setStats] = useState<ClipboardStats>({ count: 0, size: 0 });
   const [incognito, setIncognito] = useState(false);
+
+  // auto_hide_on_copy 通过 ref 读取：handleCopy 的 useCallback 依赖里不放它，
+  // 避免配置一变所有 ItemCard 的 memo 失效。
+  const autoHideRef = useRef(autoHideOnCopy ?? false);
+  autoHideRef.current = autoHideOnCopy ?? false;
 
   // Delete-undo state
   const [undoToast, setUndoToast] = useState<ClipboardItem | null>(null);
@@ -107,6 +130,20 @@ export function useClipboard({ showToast }: UseClipboardOptions): UseClipboardRe
     };
   }, []);
 
+  /**
+   * 记录一次图片加载失败：卡片内渲染错误占位 + 重试按钮。
+   * toast 只在本次挂载的首次失败时提示一条汇总（warning），不再逐条轰炸。
+   */
+  const markImageError = useCallback((id: string) => {
+    // 值用哨兵字符串 "error" 而非 boolean：ImageCache 的值类型是 string，
+    // 存 true 会让 updater 返回类型与 state 类型不兼容（tsc 2322）。
+    setImageErrors((prev) => (prev[id] ? prev : { ...prev, [id]: "error" }));
+    if (!imageErrorToastedRef.current) {
+      imageErrorToastedRef.current = true;
+      showToast("部分图片加载失败，可在卡片上点击重试", "warning");
+    }
+  }, [showToast]);
+
   const loadImage = useCallback(async (id: string) => {
     if (imageCacheRef.current[id]) return;
     try {
@@ -116,12 +153,22 @@ export function useClipboard({ showToast }: UseClipboardOptions): UseClipboardRe
         imageCacheRef.current[id] = data;
         setImageCache((prev) => ({ ...prev, [id]: data }));
       } else {
-        showToast(`图片加载失败：${id.slice(0, 8)}`, "error");
+        markImageError(id);
       }
-    } catch (e) {
-      showToast(friendlyError(e, "图片加载失败"), "error");
+    } catch {
+      markImageError(id);
     }
-  }, [showToast]);
+  }, [markImageError]);
+
+  const retryImage = useCallback((id: string) => {
+    setImageErrors((prev) => {
+      if (!prev[id]) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    void loadImage(id);
+  }, [loadImage]);
 
   const refresh = useCallback(async () => {
     try {
@@ -206,6 +253,11 @@ export function useClipboard({ showToast }: UseClipboardOptions): UseClipboardRe
       await invoke("copy_to_clipboard", { id });
       setCopiedId(id);
       setTimeout(() => setCopiedId((cur) => (cur === id ? null : cur)), 1500);
+      // 复制后自动隐藏（设置项默认开）。与主流剪贴板管理器一致：
+      // 复制即回到之前的工作面，粘贴动作紧随其后。
+      if (autoHideRef.current) {
+        void getCurrentWindow().hide();
+      }
     } catch (err) {
       showToast(friendlyError(err, "复制失败"), "error");
     }
@@ -224,10 +276,11 @@ export function useClipboard({ showToast }: UseClipboardOptions): UseClipboardRe
     if (item) {
       if (undoTimerRef.current) window.clearTimeout(undoTimerRef.current);
       setUndoToast(item);
+      // 撤销窗口期 8s：3s 对"误删后反应过来"太短，用户常在 3~5s 后才意识到删错
       undoTimerRef.current = window.setTimeout(() => {
         setUndoToast(null);
         undoTimerRef.current = null;
-      }, 3000);
+      }, 8000);
     }
   }, [items, refresh, showToast]);
 
@@ -252,6 +305,10 @@ export function useClipboard({ showToast }: UseClipboardOptions): UseClipboardRe
       setItems([]);
       setImageCache({});
       imageCacheRef.current = {};
+      // 同步清空失败标记与统计，否则底部 stats 仍显示清空前的条数/体积
+      setImageErrors({});
+      imageErrorToastedRef.current = false;
+      setStats({ count: 0, size: 0 });
     } catch (err) {
       showToast(friendlyError(err, "清空失败"), "error");
     }
@@ -347,6 +404,8 @@ export function useClipboard({ showToast }: UseClipboardOptions): UseClipboardRe
     setSearch: setSearchDebounced,
     copiedId,
     imageCache,
+    imageErrors,
+    retryImage,
     stats,
     incognito,
     refresh,

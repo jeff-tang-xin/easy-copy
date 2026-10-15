@@ -56,6 +56,12 @@ export const IconTrash: React.FC<IconProps> = (p) => (
   </Svg>
 );
 
+export const IconX: React.FC<IconProps> = (p) => (
+  <Svg {...p} strokeWidth={1.5}>
+    <path d="M4 4l8 8M12 4l-8 8" />
+  </Svg>
+);
+
 export const IconText: React.FC<IconProps> = (p) => (
   <Svg {...p} size={13}>
     <rect x="2.5" y="2" width="11" height="12" rx="1" />
@@ -287,6 +293,8 @@ export const TypeIcon: React.FC<{ type: ItemType }> = ({ type }) => {
       return <IconImage />;
     case "Files":
       return <IconFiles />;
+    case "Url":
+      return <IconGlobe />;
     default:
       return <IconText />;
   }

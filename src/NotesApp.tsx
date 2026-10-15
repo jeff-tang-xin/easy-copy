@@ -1,9 +1,10 @@
-import { useState, useEffect, useCallback, useRef, useMemo, memo } from "react";
-import type { MouseEvent as ReactMouseEvent } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo, memo } from "react";
+import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useTheme } from "./hooks/useTheme";
 import { useToast } from "./hooks/useToast";
+import { useDebouncedCallback } from "./hooks/useDebouncedCallback";
 import { friendlyError } from "./hooks/friendlyError";
 import ReactMarkdown from "react-markdown";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -97,6 +98,28 @@ function PromptModal({
   );
 }
 
+// 右键菜单定位容器。旧实现用固定 200/160 估算菜单尺寸做视口钳制，但
+// .ctx-header 实际 max-width 220px，长标题菜单会溢出屏幕右/下缘且不可点。
+// 这里渲染后用 getBoundingClientRect 实测尺寸再钳制；useLayoutEffect 在
+// 首帧绘制前完成校正，不会闪位。菜单每次打开都重新挂载，x/y 即打开时坐标。
+function ClampedMenu({ x, y, children }: { x: number; y: number; children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState({ left: x, top: y });
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const left = Math.max(4, Math.min(x, window.innerWidth - rect.width - 4));
+    const top = Math.max(4, Math.min(y, window.innerHeight - rect.height - 4));
+    setPos((cur) => (cur.left === left && cur.top === top ? cur : { left, top }));
+  }, [x, y]);
+  return (
+    <div ref={ref} className="context-menu" style={{ left: pos.left, top: pos.top }}>
+      {children}
+    </div>
+  );
+}
+
 function formatDate(iso: string): string {
   const d = new Date(iso);
   const now = new Date();
@@ -137,9 +160,15 @@ const NoteRow = memo(function NoteRow({
     onContextMenu(note.id, e.clientX, e.clientY);
   };
   const preview = previewText(note.content);
+  // 键盘可达（roving tabindex）：选中行 tabIndex=0 是 Tab 进入列表的锚点，
+  // 其余行 -1，焦点移动由列表容器的方向键委托处理（见 handleRovingKeyDown），
+  // Enter/Space 同样由容器触发 click。行本身保持无键盘逻辑，memo 不受影响。
   return (
     <div
       className={`notes-item ${isActive ? "active" : ""}`}
+      role="option"
+      aria-selected={isActive}
+      tabIndex={isActive ? 0 : -1}
       onClick={handleClick}
       onContextMenu={handleContextMenu}
     >
@@ -214,18 +243,6 @@ export default function NotesApp() {
     };
   }, [loadNotes]);
 
-  // Intercept window close: hide instead of destroy so it can be reopened
-  useEffect(() => {
-    const win = getCurrentWindow();
-    const unlisten = win.onCloseRequested((event) => {
-      event.preventDefault();
-      win.hide();
-    });
-    return () => {
-      unlisten.then((fn) => fn());
-    };
-  }, []);
-
   // Derive category/tag universes for the sidebar
   const categories = useMemo(() => {
     const set = new Set<string>();
@@ -251,6 +268,37 @@ export default function NotesApp() {
   // NoteRow 是 memo 化的，回调必须引用稳定，否则每次父级渲染都击穿 memo。
   // 两个 setter 都是 React 保证稳定的引用，所以 deps 可以为空。
   const handleSelectNote = useCallback((id: string) => setSelectedId(id), []);
+
+  // 列表/分类的键盘导航（roving tabindex）：方向键在 [role=option] 行间移动
+  // 焦点，Enter/Space 触发点击。事件委托在容器上处理，行组件（NoteRow 已
+  // memo 化）无需感知键盘逻辑，也不会因新回调引用而击穿 memo。
+  const handleRovingKeyDown = useCallback((e: React.KeyboardEvent<HTMLElement>) => {
+    const { key } = e;
+    if (key !== "ArrowDown" && key !== "ArrowUp" && key !== "Enter" && key !== " ") return;
+    const rows = Array.from(
+      e.currentTarget.querySelectorAll<HTMLElement>("[role='option']"),
+    );
+    if (rows.length === 0) return;
+    const idx = rows.indexOf(document.activeElement as HTMLElement);
+    if (key === "ArrowDown" || key === "ArrowUp") {
+      e.preventDefault();
+      const next =
+        idx === -1
+          ? key === "ArrowDown"
+            ? 0
+            : rows.length - 1
+          : key === "ArrowDown"
+            ? Math.min(idx + 1, rows.length - 1)
+            : Math.max(idx - 1, 0);
+      rows[next]?.focus();
+      rows[next]?.scrollIntoView({ block: "nearest" });
+    } else if (idx !== -1) {
+      // Enter/Space 激活当前聚焦行（复用各行已有的 onClick 逻辑）。
+      e.preventDefault();
+      rows[idx].click();
+    }
+  }, []);
+
   const handleNoteContextMenu = useCallback(
     (id: string, x: number, y: number) => setNoteMenu({ x, y, id }),
     [],
@@ -299,6 +347,81 @@ export default function NotesApp() {
   const [tagInput, setTagInput] = useState("");
   const lastLoadedId = useRef<string | null>(null);
 
+  // Debounced auto-save。saveState 增加 "error" 态：保存失败后标题栏持久
+  // 显示「未保存·点击重试」，而不是只闪一条 toast 就当没事发生。
+  const [saveState, setSaveState] = useState<"saved" | "saving" | "idle" | "error">("idle");
+  // 保存代数：每次发起保存自增。异步保存返回时只在自己仍是最新一代时才
+  // 更新 saveState，防止迟到的旧结果（如切换笔记后才返回的失败）覆盖新状态。
+  const saveEpochRef = useRef(0);
+  // 最近一次保存的 Promise（performSave 内同步赋值），供 flushSave 等待落盘。
+  const lastSaveRef = useRef<Promise<void>>(Promise.resolve());
+  // 「✓ 已保存」1.5s 后归位的定时器。新保存开始前要清掉，否则旧定时器会把
+  // saving 态提前打回 idle，状态提示闪烁。
+  const savedHintTimerRef = useRef<number | null>(null);
+  // 草稿重载 effect 在切换笔记后置位，让紧随其后的保存 effect 跳过一次：
+  // 切换的过渡渲染里草稿还是旧笔记的值、selected 已是新笔记，不跳过就会
+  // 把旧草稿调度成新笔记的保存（数据串写）。
+  const skipNextSaveRef = useRef(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  // Mirror of the content textarea used by the toolbar's wrap/insert helpers
+  // and the markdown keyboard shortcuts (Ctrl+B / Ctrl+I / Tab / list-enter).
+  // Without this, `textareaRef.current` in wrapSelection / insertAtLineStart
+  // would throw at runtime.
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // 实际落盘。参数显式传入而非闭包捕获：debouncedSave 的 flush() 执行的是
+  // 「调度时捕获的参数」，切换笔记后也能把旧笔记的草稿存到旧笔记上。
+  const performSave = useCallback(
+    (id: string, title: string, content: string, tags: string[], category: string) => {
+      const epoch = ++saveEpochRef.current;
+      const p = (async () => {
+        try {
+          const updated = await invoke<Note | null>("update_note", {
+            id,
+            input: {
+              title: title.trim() || UNTITLED,
+              content,
+              tags,
+              category: category.trim() ? category.trim() : null,
+            },
+          });
+          if (updated) {
+            setNotes((prev) => prev.map((n) => (n.id === updated.id ? updated : n)));
+            if (saveEpochRef.current === epoch) {
+              setSaveState("saved");
+              if (savedHintTimerRef.current) window.clearTimeout(savedHintTimerRef.current);
+              savedHintTimerRef.current = window.setTimeout(() => setSaveState("idle"), 1500);
+            }
+          } else if (saveEpochRef.current === epoch) {
+            // 笔记已不存在（update_note 返回空）：按保存失败处理，让
+            // 「未保存·点击重试」持久可见，而不是永远卡在「保存中…」。
+            setSaveState("error");
+          }
+        } catch (e) {
+          errorToast(friendlyError(e, "保存失败"));
+          if (saveEpochRef.current === epoch) setSaveState("error");
+        }
+      })();
+      lastSaveRef.current = p;
+    },
+    [errorToast],
+  );
+
+  const debouncedSave = useDebouncedCallback(performSave, 400);
+
+  // 同步落盘并等待完成：删除笔记 / 关窗前用，确保 update_note 先于
+  // delete_note / 窗口隐藏到达后端。performSave 自吞错误，Promise 恒 resolve。
+  const flushSave = useCallback(async () => {
+    debouncedSave.flush();
+    await lastSaveRef.current;
+  }, [debouncedSave]);
+
+  // 草稿重载：切换笔记时先把上一条的待保存内容同步落盘，再覆盖本地草稿。
+  // flush() 执行的是调度时捕获的旧笔记 id + 旧草稿，落点不会错；不 flush
+  // 的话旧定时器随后被丢弃，最后一次编辑静默丢失。（删除路径已在
+  // handleDelete/deleteNote 里 flush+await 过，这里对已删除笔记 flush 是
+  // 空操作。）注意：本 effect 必须位于 debouncedSave/saveEpochRef 等
+  // 声明之后——此前放在组件上部引发了 TDZ 运行时崩溃。
   useEffect(() => {
     if (!selected) {
       lastLoadedId.current = null;
@@ -309,62 +432,90 @@ export default function NotesApp() {
       return;
     }
     if (lastLoadedId.current !== selected.id) {
+      debouncedSave.flush();
+      // 作废在途保存的状态回写，并把编辑器复位到新笔记的干净起点——
+      // 上一条笔记的保存失败不应以「未保存」的形式泄漏到新笔记的编辑器。
+      saveEpochRef.current += 1;
+      setSaveState("idle");
+      skipNextSaveRef.current = true;
       lastLoadedId.current = selected.id;
       setDraftTitle(selected.title);
       setDraftContent(selected.content);
       setDraftTags(selected.tags);
       setDraftCategory(selected.category ?? "");
     }
-  }, [selected]);
+  }, [selected, debouncedSave]);
 
-  // Debounced auto-save
-  const saveTimer = useRef<number | null>(null);
-  const [saveState, setSaveState] = useState<"saved" | "saving" | "idle">("idle");
-  const searchInputRef = useRef<HTMLInputElement>(null);
-  // Mirror of the content textarea used by the toolbar's wrap/insert helpers
-  // and the markdown keyboard shortcuts (Ctrl+B / Ctrl+I / Tab / list-enter).
-  // Without this, `textareaRef.current` in wrapSelection / insertAtLineStart
-  // would throw at runtime.
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Intercept window close: hide instead of destroy so it can be reopened.
+  // 隐藏前先把待保存内容落盘（flush + await），否则最后 400ms 的编辑会随
+  // 窗口隐藏一起丢掉，下次打开时界面与磁盘不一致。
+  useEffect(() => {
+    const win = getCurrentWindow();
+    const unlisten = win.onCloseRequested((event) => {
+      event.preventDefault();
+      flushSave()
+        .catch(() => {})
+        .then(() => win.hide());
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [flushSave]);
 
+  // 「未保存·点击重试」：用当前草稿立即再保存一次。
+  const handleRetrySave = useCallback(() => {
+    const id = lastLoadedId.current;
+    if (!id) return;
+    setSaveState("saving");
+    performSave(id, draftTitle, draftContent, draftTags, draftCategory);
+  }, [draftTitle, draftContent, draftTags, draftCategory, performSave]);
+
+  // 调度保存：有 diff 才置 saving + 调度防抖。注意这里不能在 cleanup 里
+  // flush——本 effect 的 deps 含四个草稿字段，每次按键都会触发 cleanup，
+  // flush 会让 400ms 防抖退化成每键一写。数据不丢由四处兜底保证：切换笔记
+  // 时 flush（上方草稿重载 effect）、删除前 flush+await（handleDelete /
+  // deleteNote）、关窗前 flush+await（onCloseRequested）、卸载时由
+  // useDebouncedCallback 内置的卸载 flush 兜底。
   useEffect(() => {
     if (!selected) return;
-    // Skip on the very first load of a note (no diff)
+    // 状态性守卫：草稿尚未加载到这条笔记时绝不调度保存。skipNextSaveRef
+    // 只能挡住「重载 effect 先跑」的单次过渡；HMR 热重载（effect 全部重跑、
+    // 顺序不保证）或未来重构打乱声明顺序时，草稿可能是空的或属于别的笔记，
+    // 此时保存会把空内容串写进这条笔记——用户报告的「未编辑却触发自动保存、
+    // 内容被清空」即此机制。lastLoadedId 由草稿重载 effect 维护，是可靠的
+    // 「草稿 ↔ 笔记」对齐信号。
+    if (lastLoadedId.current !== selected.id) return;
+    // 跳过切换笔记后的过渡渲染：此时草稿还是旧笔记的值、selected 已是
+    // 新笔记，若不跳过会把旧草稿调度成新笔记的保存（数据串写）。
+    if (skipNextSaveRef.current) {
+      skipNextSaveRef.current = false;
+      return;
+    }
+    // Skip on the very first load of a note (no diff). Title compares
+    // post-normalization: performSave persists `trim() || UNTITLED`, so an
+    // empty draft title vs a stored "未命名笔记" must not read as a diff —
+    // otherwise every notes refresh re-schedules an identical save forever.
+    const normTitle = (t: string) => t.trim() || UNTITLED;
     if (
-      draftTitle === selected.title &&
+      normTitle(draftTitle) === normTitle(selected.title) &&
       draftContent === selected.content &&
       JSON.stringify(draftTags) === JSON.stringify(selected.tags) &&
       (draftCategory || null) === (selected.category || null)
     ) {
       return;
     }
-    if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    if (savedHintTimerRef.current) window.clearTimeout(savedHintTimerRef.current);
     setSaveState("saving");
-    saveTimer.current = window.setTimeout(async () => {
-      try {
-        const updated = await invoke<Note | null>("update_note", {
-          id: selected.id,
-          input: {
-            title: draftTitle.trim() || UNTITLED,
-            content: draftContent,
-            tags: draftTags,
-            category: draftCategory.trim() ? draftCategory.trim() : null,
-          },
-        });
-        if (updated) {
-          setNotes((prev) => prev.map((n) => (n.id === updated.id ? updated : n)));
-          setSaveState("saved");
-          window.setTimeout(() => setSaveState("idle"), 1500);
-        }
-      } catch (e) {
-        errorToast(friendlyError(e, "保存失败"));
-        setSaveState("idle");
-      }
-    }, 400);
-    return () => {
-      if (saveTimer.current) window.clearTimeout(saveTimer.current);
-    };
-  }, [draftTitle, draftContent, draftTags, draftCategory, selected, errorToast]);
+    debouncedSave(selected.id, draftTitle, draftContent, draftTags, draftCategory);
+  }, [draftTitle, draftContent, draftTags, draftCategory, selected, debouncedSave]);
+
+  // 卸载时清掉「已保存」提示定时器（待保存内容由 hook 的卸载 flush 兜底）。
+  useEffect(
+    () => () => {
+      if (savedHintTimerRef.current) window.clearTimeout(savedHintTimerRef.current);
+    },
+    [],
+  );
 
   // Create a fresh note. Wrapped in useCallback so the global keydown
   // effect below can list it as a dependency without the listener being
@@ -423,6 +574,9 @@ export default function NotesApp() {
       onConfirm: async () => {
         setConfirmModal(null);
         try {
+          // 先落盘待保存编辑再删除：否则删除引发的草稿重载会对已删除的
+          // 笔记触发 flush，update_note 打到不存在的笔记上报错。
+          await flushSave();
           await invoke("delete_note", { id: selected.id });
           setNotes((prev) => {
             const next = prev.filter((n) => n.id !== selected.id);
@@ -491,6 +645,8 @@ export default function NotesApp() {
       onConfirm: async () => {
         setConfirmModal(null);
         try {
+          // 同 handleDelete：先落盘待保存编辑再删除，避免 update/delete 竞态。
+          await flushSave();
           await invoke("delete_note", { id: note.id });
           setNotes((prev) => {
             const next = prev.filter((n) => n.id !== note.id);
@@ -611,8 +767,11 @@ export default function NotesApp() {
   const handleOpenInBrowser = async () => {
     if (!selected) return;
     try {
+      // 不传 urlTransform：react-markdown 默认 defaultUrlTransform 只放行
+      // http/https/mailto 等安全协议，javascript: 等会被清空。此前的恒等
+      // 放行会让导出的 HTML 在浏览器里可执行脚本。
       const innerHtml = renderToStaticMarkup(
-        <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={(url) => url}>
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>
           {draftContent || "*暂无内容可预览。*"}
         </ReactMarkdown>,
       );
@@ -683,36 +842,48 @@ ${innerHtml}
 
         <div className="side-section">
           <h4>分类</h4>
-          <div
-            className={`cat-item ${selectedCategory === null ? "active" : ""}`}
-            onClick={() => setSelectedCategory(null)}
-          >
-            全部
-            <span className="cat-count">{notes.length}</span>
-          </div>
-          <div
-            className={`cat-item ${selectedCategory === "" ? "active" : ""}`}
-            onClick={() => setSelectedCategory("")}
-          >
-            未分类
-            <span className="cat-count">{notes.filter((n) => !n.category).length}</span>
-          </div>
-          {categories.map((c) => (
+          {/* 键盘可达：roving tabindex + 方向键/Enter，见 handleRovingKeyDown */}
+          <div role="listbox" aria-label="分类" onKeyDown={handleRovingKeyDown}>
             <div
-              key={c}
-              className={`cat-item ${selectedCategory === c ? "active" : ""}`}
-              onClick={() => setSelectedCategory(c)}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                setCatMenu({ x: e.clientX, y: e.clientY, name: c });
-              }}
-              title={c}
+              className={`cat-item ${selectedCategory === null ? "active" : ""}`}
+              role="option"
+              aria-selected={selectedCategory === null}
+              tabIndex={selectedCategory === null ? 0 : -1}
+              onClick={() => setSelectedCategory(null)}
             >
-              <span className="cat-name">{c}</span>
-              <span className="cat-count">{notes.filter((n) => n.category === c).length}</span>
+              全部
+              <span className="cat-count">{notes.length}</span>
             </div>
-          ))}
+            <div
+              className={`cat-item ${selectedCategory === "" ? "active" : ""}`}
+              role="option"
+              aria-selected={selectedCategory === ""}
+              tabIndex={selectedCategory === "" ? 0 : -1}
+              onClick={() => setSelectedCategory("")}
+            >
+              未分类
+              <span className="cat-count">{notes.filter((n) => !n.category).length}</span>
+            </div>
+            {categories.map((c) => (
+              <div
+                key={c}
+                className={`cat-item ${selectedCategory === c ? "active" : ""}`}
+                role="option"
+                aria-selected={selectedCategory === c}
+                tabIndex={selectedCategory === c ? 0 : -1}
+                onClick={() => setSelectedCategory(c)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setCatMenu({ x: e.clientX, y: e.clientY, name: c });
+                }}
+                title={c}
+              >
+                <span className="cat-name">{c}</span>
+                <span className="cat-count">{notes.filter((n) => n.category === c).length}</span>
+              </div>
+            ))}
+          </div>
         </div>
 
         {allTags.length > 0 && (
@@ -738,10 +909,25 @@ ${innerHtml}
           </div>
         )}
 
-        <div className="notes-list">
+        <div
+          className="notes-list"
+          role="listbox"
+          aria-label="笔记列表"
+          onKeyDown={handleRovingKeyDown}
+        >
           {filtered.length === 0 && (
             <div className="notes-empty">
-              {notes.length === 0 ? "暂无笔记。点击 + 创建一条。" : "无匹配结果。"}
+              <div className="notes-empty-title">
+                {notes.length === 0 ? "暂无笔记" : "无匹配结果"}
+              </div>
+              <div className="notes-empty-hint">
+                {notes.length === 0 ? "点击右上角的 + 创建第一条笔记" : "试试更换关键词，或清除搜索条件"}
+              </div>
+              {search && (
+                <button className="notes-btn" onClick={() => setSearch("")}>
+                  清空搜索
+                </button>
+              )}
             </div>
           )}
           {filtered.map((n) => (
@@ -764,7 +950,8 @@ ${innerHtml}
       <main className="notes-editor">
         {!selected ? (
           <div className="notes-blank">
-            <p>未选择任何笔记。</p>
+            <p className="notes-blank-title">未选择任何笔记</p>
+            <p className="notes-blank-hint">从左侧选择一条笔记，或立即新建</p>
             <button className="notes-btn primary" onClick={handleNew}>新建一条笔记</button>
           </div>
         ) : (
@@ -779,6 +966,15 @@ ${innerHtml}
                 />
                 <span className={`notes-saved-hint ${saveState === "saved" ? "visible" : ""}`}>
                   {saveState === "saving" ? "保存中…" : saveState === "saved" ? "✓ 已保存" : ""}
+                  {saveState === "error" && (
+                    <button
+                      className="save-retry"
+                      onClick={handleRetrySave}
+                      title="上次保存失败，点击重试"
+                    >
+                      未保存·点击重试
+                    </button>
+                  )}
                 </span>
                 <div className="notes-view-segmented" role="group" aria-label="视图模式">
                   {(["edit", "split", "preview"] as const).map((m) => (
@@ -871,7 +1067,9 @@ ${innerHtml}
             <div className={`notes-body${viewMode === "split" ? " split" : ""}`}>
               {viewMode !== "edit" && (
                 <div className="notes-preview markdown-body">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={(url) => url}>
+                  {/* 不传 urlTransform：默认消毒只放行 http/https/mailto 等
+                      安全协议，预览里 javascript: 链接不可执行。 */}
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
                     {draftContent || "*暂无内容可预览。*"}
                   </ReactMarkdown>
                 </div>
@@ -928,10 +1126,8 @@ ${innerHtml}
         return (
           <>
             <div className="context-menu-overlay" onClick={() => setNoteMenu(null)} onContextMenu={(e) => { e.preventDefault(); setNoteMenu(null); }} />
-            <div
-              className="context-menu"
-              style={{ left: Math.min(noteMenu.x, window.innerWidth - 200), top: Math.min(noteMenu.y, window.innerHeight - 200) }}
-            >
+            {/* ClampedMenu 渲染后实测尺寸再钳制，长标题不再溢出视口 */}
+            <ClampedMenu x={noteMenu.x} y={noteMenu.y}>
               <div className="ctx-header" title={note.title || UNTITLED}>{note.title || UNTITLED}</div>
               <button className="ctx-item" onClick={() => { setNoteMenu(null); pinNote(note.id); }}>
                 {note.pinned ? "取消置顶" : "置顶"}
@@ -942,7 +1138,7 @@ ${innerHtml}
               <button className="ctx-item ctx-danger" onClick={() => { setNoteMenu(null); deleteNote(note); }}>
                 删除
               </button>
-            </div>
+            </ClampedMenu>
           </>
         );
       })()}
@@ -950,10 +1146,7 @@ ${innerHtml}
       {catMenu && (
         <>
           <div className="context-menu-overlay" onClick={() => setCatMenu(null)} onContextMenu={(e) => { e.preventDefault(); setCatMenu(null); }} />
-          <div
-            className="context-menu"
-            style={{ left: Math.min(catMenu.x, window.innerWidth - 200), top: Math.min(catMenu.y, window.innerHeight - 160) }}
-          >
+          <ClampedMenu x={catMenu.x} y={catMenu.y}>
             <div className="ctx-header" title={catMenu.name}>分类：{catMenu.name}</div>
             <button className="ctx-item" onClick={async () => {
               const oldName = catMenu.name;
@@ -1003,7 +1196,7 @@ ${innerHtml}
             }}>
               删除分类
             </button>
-          </div>
+          </ClampedMenu>
         </>
       )}
     </div>

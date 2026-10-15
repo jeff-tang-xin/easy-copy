@@ -521,7 +521,7 @@ fn create_note_from_clip(
                 .collect();
             ("[Clip] [Files]".to_string(), files.join("\n"))
         }
-        models::ItemType::Text => {
+        models::ItemType::Text | models::ItemType::Url => {
             let t = item
                 .content
                 .lines()

@@ -11,12 +11,36 @@ use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
-use crate::models::{ClipboardItem, ItemType, AppConfig, clamp_max_items, clamp_poll_interval};
+use crate::models::{classify_text, ClipboardItem, ItemType, AppConfig, clamp_max_items, clamp_poll_interval};
 
 /// Global clipboard access lock. Windows only allows one thread to hold the
 /// clipboard open at a time; the poll loop and any copy operation must not race
 /// or `OpenClipboard`/`SetClipboardData` fails with os error 1418.
 pub static CLIPBOARD_LOCK: Mutex<()> = Mutex::new(());
+
+/// Retention window for clipboard history: entries older than this are
+/// pruned on insert and on load. Favorites are exempt — the user explicitly
+/// starred them, and auto-deleting a starred item reads as data loss.
+pub const CLIPBOARD_RETENTION_MS: i64 = 3 * 24 * 60 * 60 * 1000;
+
+/// Drop entries older than the retention window (favorites exempt) from the
+/// given list. Returns `(removed_count, removed_image_ids)` so the caller can
+/// release expired image payloads (in-memory map here; the PNG files are
+/// swept by `save_to_disk`'s orphan cleanup). Pure function over the list —
+/// lock-free and unit-testable. Callers holding the `items` lock use this
+/// directly; `prune_expired` is the public lock-taking wrapper.
+fn prune_expired_locked(items: &mut Vec<ClipboardItem>, now_ms: i64) -> (usize, Vec<String>) {
+    let mut removed_image_ids: Vec<String> = Vec::new();
+    let before = items.len();
+    items.retain(|i| {
+        let expired = now_ms - i.timestamp > CLIPBOARD_RETENTION_MS;
+        if expired && i.item_type == ItemType::Image {
+            removed_image_ids.push(i.id.clone());
+        }
+        !expired || i.favorite
+    });
+    (before - items.len(), removed_image_ids)
+}
 
 // =========================================================================
 // LOCK ORDERING (Clipboar­dManager)
@@ -269,9 +293,35 @@ impl ClipboardManager {
 
         // Load items from JSON
         if let Ok(json) = fs::read_to_string(data_dir.join("history.json")) {
-            if let Ok(items) = serde_json::from_str::<Vec<ClipboardItem>>(&json) {
-                let mut self_items = self.items.lock().unwrap_or_else(|e| e.into_inner());
-                *self_items = items;
+            if let Ok(mut items) = serde_json::from_str::<Vec<ClipboardItem>>(&json) {
+                // Re-classify legacy Text entries: URLs copied before the Url
+                // type existed are stored as Text — upgrade them so type
+                // filtering covers old history too. Plain text is unaffected
+                // (classify_text only fires on a bare single-line URL).
+                for item in items.iter_mut() {
+                    if item.item_type == ItemType::Text {
+                        item.item_type = classify_text(&item.content);
+                    }
+                }
+                // Retention sweep on load: history.json may hold entries
+                // older than the window (the app was closed for days).
+                let (_, removed) =
+                    prune_expired_locked(&mut items, chrono::Utc::now().timestamp_millis());
+                {
+                    let mut self_items = self.items.lock().unwrap_or_else(|e| e.into_inner());
+                    *self_items = items;
+                }
+                if !removed.is_empty() {
+                    let mut images = self.images.lock().unwrap_or_else(|e| e.into_inner());
+                    for id in &removed {
+                        images.remove(id);
+                    }
+                    drop(images);
+                    // Persist the pruned state right away so a crash after
+                    // load doesn't resurrect expired entries. save_to_disk
+                    // also sweeps the now-orphaned PNG files.
+                    self.save_to_disk();
+                }
             }
         }
 
@@ -355,7 +405,13 @@ impl ClipboardManager {
         results
     }
 
-    /// Insert an item at the head, dedup by content+type, truncate if needed.
+    /// Insert an item at the head, dedup by content, truncate if needed.
+    ///
+    /// Dedup is content-only (was content+type): the same payload can
+    /// legitimately change type between copies — a URL first stored as Text
+    /// (legacy) re-classifies as Url on the next copy. Merging keeps one
+    /// entry and upgrades its type to the latest classification instead of
+    /// leaving two near-identical rows.
     ///
     /// Lock order (see module-level doc): items → max_items → images.
     /// `items` is dropped in a scoped block before the truncate path takes
@@ -363,10 +419,18 @@ impl ClipboardManager {
     fn insert_item(&self, item: ClipboardItem) {
         let mut items = self.items.lock().unwrap_or_else(|e| e.into_inner());
 
-        // Dedup: if same content+type exists, move it to top with fresh timestamp
-        if let Some(pos) = items.iter().position(|i| i.content == item.content && i.item_type == item.item_type) {
+        // Retention sweep before inserting: entries older than the window
+        // (favorites exempt) leave. Runs every poll tick — O(n) over at most
+        // max_items entries, negligible.
+        let (_, removed_image_ids) =
+            prune_expired_locked(&mut items, chrono::Utc::now().timestamp_millis());
+        let mut removed_image_ids = removed_image_ids;
+
+        // Dedup: same content moves to top with a fresh timestamp + type.
+        if let Some(pos) = items.iter().position(|i| i.content == item.content) {
             let mut existing = items.remove(pos);
-            existing.timestamp = item.timestamp.clone();
+            existing.timestamp = item.timestamp;
+            existing.item_type = item.item_type;
             items.insert(0, existing);
         } else {
             items.insert(0, item);
@@ -380,17 +444,43 @@ impl ClipboardManager {
                 .collect();
             items.truncate(max);
             drop(items);
-            if !removed.is_empty() {
-                let mut images = self.images.lock().unwrap_or_else(|e| e.into_inner());
-                for id in removed {
-                    images.remove(&id);
-                }
-                drop(images);
-            }
+            removed_image_ids.extend(removed);
         } else {
             drop(items);
         }
+        if !removed_image_ids.is_empty() {
+            let mut images = self.images.lock().unwrap_or_else(|e| e.into_inner());
+            for id in removed_image_ids {
+                images.remove(&id);
+            }
+            drop(images);
+        }
         self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Public retention sweep (tests / manual calls): prune with the current
+    /// clock and release any expired image payloads. Returns how many
+    /// entries were removed. Not wired into the poll loop (insert_item and
+    /// load_from_disk prune via the lock-free helper); kept as a testable
+    /// operational entry point.
+    #[allow(dead_code)]
+    pub fn prune_expired(&self) -> usize {
+        let mut items = self.items.lock().unwrap_or_else(|e| e.into_inner());
+        let (removed_count, image_ids) =
+            prune_expired_locked(&mut items, chrono::Utc::now().timestamp_millis());
+        drop(items);
+        if !image_ids.is_empty() {
+            let mut images = self.images.lock().unwrap_or_else(|e| e.into_inner());
+            for id in &image_ids {
+                images.remove(id);
+            }
+            drop(images);
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+        if removed_count > 0 {
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+        removed_count
     }
 
     pub fn get_image_data(&self, id: &str) -> Option<String> {
@@ -421,7 +511,8 @@ impl ClipboardManager {
         };
 
         match item.item_type {
-            ItemType::Text => {
+            // A URL is copied back as text — same mechanism, same trackers.
+            ItemType::Text | ItemType::Url => {
                 // Update last_text, clear other trackers
                 {
                     let mut last = self.last_text.lock().unwrap_or_else(|e| e.into_inner());
@@ -855,6 +946,118 @@ mod tests {
             .join(format!("easy-copy-clipboard-test-{}-{}", std::process::id(), n));
         let _ = std::fs::create_dir_all(&dir);
         ClipboardManager::new(max_items, Some(dir))
+    }
+
+    // ── retention (3-day prune) ──────────────────────────────
+
+    #[test]
+    fn prune_drops_expired_but_keeps_favorites() {
+        let m = fresh_manager(10);
+        let now = chrono::Utc::now().timestamp_millis();
+        let old_ts = now - CLIPBOARD_RETENTION_MS - 1000;
+
+        let mut a = ClipboardItem::new_text("old-plain".into());
+        a.timestamp = old_ts;
+        let mut b = ClipboardItem::new_text("old-fav".into());
+        b.timestamp = old_ts;
+        b.favorite = true;
+        let mut c = ClipboardItem::new_text("fresh".into());
+        c.timestamp = now;
+        // Seed the list directly: insert_item now prunes on the way in, so
+        // inserting stale entries one by one would lose them mid-setup and
+        // we couldn't observe prune_expired's own behaviour in isolation.
+        {
+            let mut items = m.items.lock().unwrap_or_else(|e| e.into_inner());
+            items.push(a);
+            items.push(b);
+            items.push(c);
+        }
+
+        let removed = m.prune_expired();
+        assert_eq!(removed, 1);
+        let items = m.get_items();
+        let contents: Vec<&str> = items.iter().map(|i| i.content.as_str()).collect();
+        assert!(contents.contains(&"old-fav"), "favorite must survive the window");
+        assert!(contents.contains(&"fresh"));
+        assert!(!contents.contains(&"old-plain"));
+    }
+
+    #[test]
+    fn prune_releases_expired_image_payloads() {
+        let m = fresh_manager(10);
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut img = ClipboardItem::new_image("Image 1x1".into());
+        img.timestamp = now - CLIPBOARD_RETENTION_MS - 1000;
+        {
+            let mut images = m.images.lock().unwrap_or_else(|e| e.into_inner());
+            images.insert(img.id.clone(), vec![1, 2, 3]);
+        }
+        m.insert_item(img);
+
+        assert_eq!(m.prune_expired(), 1);
+        let images = m.images.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(images.is_empty(), "expired image payload must be released");
+    }
+
+    #[test]
+    fn insert_item_prunes_expired_entries_on_the_way_in() {
+        let m = fresh_manager(10);
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut old = ClipboardItem::new_text("stale".into());
+        old.timestamp = now - CLIPBOARD_RETENTION_MS - 1000;
+        m.insert_item(old);
+        // The next insert's retention sweep should drop the stale entry.
+        m.insert_item(ClipboardItem::new_text("new".into()));
+        let items = m.get_items();
+        let contents: Vec<&str> = items.iter().map(|i| i.content.as_str()).collect();
+        assert_eq!(contents, vec!["new"]);
+    }
+
+    // ── dedup across types ───────────────────────────────────
+
+    #[test]
+    fn dedup_merges_same_content_across_types_and_upgrades_type() {
+        let m = fresh_manager(10);
+        // Legacy entry stored as Text (pre-Url data).
+        let mut legacy = ClipboardItem::new_text("https://example.com".into());
+        legacy.item_type = ItemType::Text;
+        m.insert_item(legacy);
+        // Same URL copied again — new_text classifies it as Url.
+        m.insert_item(ClipboardItem::new_text("https://example.com".into()));
+
+        let items = m.get_items();
+        assert_eq!(items.len(), 1, "same content must merge regardless of type");
+        assert_eq!(items[0].item_type, ItemType::Url, "type upgrades to latest classification");
+    }
+
+    // ── load-time reclassification ───────────────────────────
+
+    #[test]
+    fn load_reclassifies_legacy_text_urls_and_prunes_expired() {
+        let m = fresh_manager(10);
+        let dir = m
+            .data_dir
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .unwrap();
+        let fresh_ts = chrono::Utc::now().timestamp_millis() - 1000;
+        let expired_ts = chrono::Utc::now().timestamp_millis() - CLIPBOARD_RETENTION_MS - 1000;
+        let json = format!(
+            r#"[
+                {{"id":"t1","content":"https://example.com/old","timestamp":{fresh_ts},"tags":[],"saved_as_note":false,"source_clip_id":null,"type":"Text","favorite":false}},
+                {{"id":"t2","content":"plain text","timestamp":{fresh_ts},"tags":[],"saved_as_note":false,"source_clip_id":null,"type":"Text","favorite":false}},
+                {{"id":"t3","content":"ancient","timestamp":{expired_ts},"tags":[],"saved_as_note":false,"source_clip_id":null,"type":"Text","favorite":false}}
+            ]"#
+        );
+        std::fs::write(dir.join("history.json"), json).unwrap();
+        m.load_from_disk();
+
+        let items = m.get_items();
+        assert_eq!(items.len(), 2, "expired entry must be pruned on load");
+        let by_id = |id: &str| items.iter().find(|i| i.id == id).unwrap();
+        assert_eq!(by_id("t1").item_type, ItemType::Url, "legacy Text URL upgrades to Url");
+        assert_eq!(by_id("t2").item_type, ItemType::Text, "plain text stays Text");
     }
 
     // ── strip_ansi_escapes ──────────────────────────────────

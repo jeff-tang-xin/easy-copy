@@ -186,6 +186,16 @@ export default function ScreenshotApp() {
   const [pens, setPens] = useState<PenAnnotation[]>([]);
   const [texts, setTexts] = useState<TextAnnotation[]>([]);
   const [mosaics, setMosaics] = useState<MosaicAnnotation[]>([]);
+  // Snapshots taken by clearAll so Ctrl+Z can restore a whole cleared batch.
+  // Reset on every new capture / close — a stale snapshot must never leak
+  // annotations from one screenshot into the next.
+  const clearSnapshotsRef = useRef<{ rects: RectAnnotation[]; arrows: ArrowAnnotation[]; pens: PenAnnotation[]; texts: TextAnnotation[]; mosaics: MosaicAnnotation[] }[]>([]);
+  // Double-Esc guard for the edit phase: the first Esc with annotations
+  // present only warns; the second (within 2.5s) actually exits. Stored as
+  // a Date.now() timestamp so the armed state self-expires — mouse-only
+  // editing (no keydown to disarm) can't leave a stale armed flag that
+  // would turn the *next* first-Esc into an immediate exit.
+  const escArmedRef = useRef(0);
 
   // Id of the text annotation currently highlighted for edit/delete (select tool).
   const [selectedTextId, setSelectedTextId] = useState<string | null>(null);
@@ -253,10 +263,13 @@ export default function ScreenshotApp() {
   // In-app toast. Kept local (not a global store) because the screenshot
   // overlay is a one-shot window — there is no other UI here to coordinate
   // with, and a global event bus would just add wiring for no benefit.
-  const [appToast, setAppToast] = useState<{ msg: string; type: "success" | "error" } | null>(null);
-  const showAppToast = (msg: string, type: "success" | "error" = "success") => {
+  const [appToast, setAppToast] = useState<{ msg: string; type: "success" | "error" | "warning" } | null>(null);
+  const showAppToast = (msg: string, type: "success" | "error" | "warning" = "success") => {
     setAppToast({ msg, type });
-    window.setTimeout(() => setAppToast((cur) => (cur?.msg === msg ? null : cur)), 2500);
+    // Duration scales with severity (same tiers as the shared useToast:
+    // error 5s / warning 4s) so readable messages aren't cut off.
+    const dur = type === "error" ? 5000 : type === "warning" ? 4000 : 2500;
+    window.setTimeout(() => setAppToast((cur) => (cur?.msg === msg ? null : cur)), dur);
   };
 
   // Render-friendly message from a Rust/JS error. The raw payload often looks
@@ -277,6 +290,7 @@ export default function ScreenshotApp() {
       setPens([]);
       setTexts([]);
       setMosaics([]);
+      clearSnapshotsRef.current = []; // fresh capture: no stale undo snapshots
       setSelectedTextId(null);
       setRegion(null);
       regionRef.current = null;
@@ -1027,6 +1041,10 @@ export default function ScreenshotApp() {
     try {
       const path = await invoke<string>("save_screenshot", { dataUrl });
       showAppToast(`已保存：${path}`, "success");
+      // Hold the overlay for a beat so the toast is actually seen — closing
+      // immediately made "已保存：路径" invisible (the window hid before the
+      // paint). 1.2s matches the toast's read time for a short path.
+      await new Promise((r) => window.setTimeout(r, 1200));
       await closeOverlay();
     } catch (e) {
       showAppToast(`保存失败：${friendly(e)}`, "error");
@@ -1112,9 +1130,21 @@ export default function ScreenshotApp() {
       if (e.key === "Escape") {
         // A selected text de-selects first, so ESC doesn't jump straight out.
         if (selectedTextId) { setSelectedTextId(null); return; }
-        // In edit phase, ESC then goes back to region selection instead of
-        // closing outright, so users can re-frame without re-triggering capture.
-        if (phase === "edit") { setPhase("select"); setTool("select"); setRegion(null); regionRef.current = null; return; }
+        // In edit phase, ESC goes back to region selection so users can
+        // re-frame without re-triggering capture — but annotations would be
+        // silently dropped by that transition. With annotations present the
+        // first Esc only warns; a second Esc within 2.5s confirms the exit.
+        if (phase === "edit") {
+          const hasAnnotations = rects.length > 0 || arrows.length > 0 || pens.length > 0 || texts.length > 0 || mosaics.length > 0;
+          const now = Date.now();
+          if (hasAnnotations && (escArmedRef.current === 0 || now - escArmedRef.current > 2500)) {
+            escArmedRef.current = now;
+            showAppToast("再按一次 Esc 退出并丢弃全部标注", "warning");
+            return;
+          }
+          escArmedRef.current = 0;
+          setPhase("select"); setTool("select"); setRegion(null); regionRef.current = null; return;
+        }
         handleCancel();
         return;
       }

@@ -11,7 +11,7 @@
   background-color: var(--bg-primary);
   color: var(--text-primary);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", Roboto, sans-serif;
-  font-size: 13px;
+  font-size: var(--fs-md);
   overflow: hidden;
 }
 
@@ -21,14 +21,15 @@
   min-width: 240px;
   display: flex;
   flex-direction: column;
-  background-color: var(--bg-secondary);
+  background-color: var(--bg-primary);
+  background-image: var(--brand-wash);
   border-right: 1px solid var(--border-color);
 }
 
 .notes-toolbar {
   display: flex;
-  gap: 8px;
-  padding: 10px 12px;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
   border-bottom: 1px solid var(--border-color);
   flex-shrink: 0;
 }
@@ -41,12 +42,12 @@
 .notes-search {
   flex: 1;
   width: 100%;
-  padding: 7px 28px 7px 10px;
+  padding: var(--sp-2) var(--sp-6) var(--sp-2) var(--sp-2);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
   background-color: var(--bg-tertiary);
   color: var(--text-primary);
-  font-size: 13px;
+  font-size: var(--fs-md);
   outline: none;
   transition: border-color var(--dur) var(--ease), background-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
@@ -66,7 +67,7 @@
   border: none;
   background: transparent;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1;
   cursor: pointer;
   border-radius: var(--radius-xs);
@@ -80,8 +81,8 @@
   background-color: var(--bg-hover);
 }
 .notes-list-status {
-  padding: 8px 14px;
-  font-size: 11px;
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-xs);
   color: var(--text-muted);
   border-top: 1px solid var(--border-color);
   flex-shrink: 0;
@@ -90,16 +91,16 @@
 
 /* ===== Side sections (Categories + Tags) ===== */
 .side-section {
-  padding: 10px 10px 8px;
+  padding: var(--sp-2) var(--sp-2) var(--sp-2);
   border-bottom: 1px solid var(--border-color);
   flex-shrink: 0;
 }
 .side-section h4 {
-  font-size: 10px;
+  font-size: var(--fs-xs);
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.6px;
-  margin: 0 6px 8px;
+  margin: 0 var(--sp-2) var(--sp-2);
   font-weight: 700;
 }
 
@@ -107,12 +108,12 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 6px 10px;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-2);
   margin: 1px 0;
   border-radius: var(--radius-sm);
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--fs-md);
   color: var(--text-secondary);
   border-left: 3px solid transparent;
   transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
@@ -134,11 +135,11 @@
   text-overflow: ellipsis;
 }
 .cat-count {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--text-muted);
   background-color: var(--bg-tertiary);
-  padding: 1px 7px;
-  border-radius: 10px;
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-md);
   min-width: 20px;
   text-align: center;
 }
@@ -150,14 +151,14 @@
 .tag-cloud {
   display: flex;
   flex-wrap: wrap;
-  gap: 5px;
+  gap: var(--sp-1);
   max-height: 140px;
   overflow-y: auto;
-  padding: 2px 4px 2px;
+  padding: 2px var(--sp-1) 2px;
 }
 .tag-chip {
-  font-size: 11px;
-  padding: 3px 10px;
+  font-size: var(--fs-xs);
+  padding: 3px var(--sp-2);
   border-radius: var(--radius-full);
   background-color: var(--bg-tertiary);
   color: var(--text-secondary);
@@ -176,17 +177,17 @@
 .notes-list {
   flex: 1;
   overflow-y: auto;
-  padding: 4px 6px;
+  padding: var(--sp-1) var(--sp-2);
   min-height: 0;
 }
 .notes-empty {
-  padding: 24px 12px;
+  padding: var(--sp-6) var(--sp-3);
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   text-align: center;
 }
 .notes-item {
-  padding: 9px 12px;
+  padding: var(--sp-2) var(--sp-3);
   margin: 2px 0;
   border-radius: var(--radius-sm);
   cursor: pointer;
@@ -209,7 +210,7 @@
   border-left-color: var(--accent);
 }
 .notes-item-title {
-  font-size: 13px;
+  font-size: var(--fs-md);
   font-weight: 600;
   color: var(--text-primary);
   white-space: nowrap;
@@ -217,12 +218,12 @@
   text-overflow: ellipsis;
 }
 .notes-item.active .notes-item-title { color: var(--accent); }
-.notes-pin { margin-right: 4px; }
+.notes-pin { margin-right: var(--sp-1); }
 .notes-item-meta {
   display: flex;
   justify-content: space-between;
-  gap: 8px;
-  font-size: 11px;
+  gap: var(--sp-2);
+  font-size: var(--fs-xs);
   color: var(--text-muted);
   margin-top: 3px;
 }
@@ -247,22 +248,22 @@
   color: var(--text-muted);
 }
 .notes-blank p {
-  margin-bottom: 14px;
-  font-size: 13px;
+  margin-bottom: var(--sp-3);
+  font-size: var(--fs-md);
 }
 
 .notes-editor-header {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 10px 14px;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
   border-bottom: 1px solid var(--border-color);
   background-color: var(--bg-secondary);
   flex-shrink: 0;
 }
 .notes-header-row {
   display: flex;
-  gap: 8px;
+  gap: var(--sp-2);
   align-items: center;
 }
 .notes-title-input {
@@ -270,18 +271,18 @@
   min-width: 200px;
   border: none;
   background: transparent;
-  font-size: 16px;
+  font-size: var(--fs-lg);
   font-weight: 700;
   color: var(--text-primary);
   outline: none;
-  padding: 4px 2px;
+  padding: var(--sp-1) 2px;
 }
 .notes-title-input::placeholder { color: var(--text-muted); }
 
 .cat-input,
 .notes-cat-select {
-  padding: 6px 10px;
-  font-size: 12px;
+  padding: var(--sp-2) var(--sp-2);
+  font-size: var(--fs-sm);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
   background-color: var(--bg-tertiary);
@@ -298,18 +299,18 @@
 }
 
 .notes-saved-hint {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--text-muted);
-  padding: 0 4px;
+  padding: 0 var(--sp-1);
   user-select: none;
   min-width: 56px;
   text-align: right;
   transition: opacity var(--dur) var(--ease), color var(--dur) var(--ease);
 }
-.notes-saved-hint.visible { color: var(--green, #9ece6a); }
+.notes-saved-hint.visible { color: var(--green); }
 
 .notes-item-preview {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--text-muted);
   margin-top: 2px;
   white-space: nowrap;
@@ -319,13 +320,13 @@
 
 .notes-actions {
   display: flex;
-  gap: 6px;
+  gap: var(--sp-2);
   flex-wrap: wrap;
   margin-left: auto;
 }
 .notes-btn {
-  padding: 6px 12px;
-  font-size: 12px;
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm);
   font-weight: 500;
   border: 1px solid var(--border-color);
   background-color: var(--bg-tertiary);
@@ -347,13 +348,13 @@
 }
 .notes-btn.primary {
   background-color: var(--accent);
-  color: #fff;
+  color: var(--text-on-accent);
   border-color: var(--accent);
 }
 .notes-btn.primary:hover {
   background-color: var(--accent-hover);
   border-color: var(--accent-hover);
-  color: #fff;
+  color: var(--text-on-accent);
 }
 .notes-btn.danger:hover {
   background-color: var(--danger-bg);
@@ -369,8 +370,8 @@
   flex-shrink: 0;
 }
 .notes-seg-btn {
-  padding: 6px 14px;
-  font-size: 12px;
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm);
   font-weight: 500;
   border: none;
   background: transparent;
@@ -394,7 +395,7 @@
 .notes-format-bar {
   display: flex;
   gap: 2px;
-  padding: 4px 14px;
+  padding: var(--sp-1) var(--sp-3);
   border-bottom: 1px solid var(--border-color);
   background-color: var(--bg-secondary);
   flex-shrink: 0;
@@ -402,8 +403,8 @@
   flex-wrap: wrap;
 }
 .notes-format-btn {
-  padding: 4px 8px;
-  font-size: 12px;
+  padding: var(--sp-1) var(--sp-2);
+  font-size: var(--fs-sm);
   border: 1px solid transparent;
   background: transparent;
   color: var(--text-secondary);
@@ -421,7 +422,7 @@
   width: 1px;
   height: 18px;
   background-color: var(--border-color);
-  margin: 0 4px;
+  margin: 0 var(--sp-1);
   flex-shrink: 0;
 }
 
@@ -429,16 +430,16 @@
 .notes-tags-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  padding: 8px 14px;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
   border-bottom: 1px solid var(--border-color);
   align-items: center;
   background-color: var(--bg-secondary);
   flex-shrink: 0;
 }
 .notes-tag {
-  font-size: 11px;
-  padding: 3px 4px 3px 10px;
+  font-size: var(--fs-xs);
+  padding: 3px var(--sp-1) 3px var(--sp-2);
   border-radius: var(--radius-full);
   background-color: var(--accent-dim);
   color: var(--accent);
@@ -453,8 +454,8 @@
   border: none;
   color: var(--accent);
   cursor: pointer;
-  font-size: 14px;
-  padding: 0 4px;
+  font-size: var(--fs-md);
+  padding: 0 var(--sp-1);
   line-height: 1;
   border-radius: 50%;
   opacity: 0.7;
@@ -468,10 +469,10 @@
   border: 1px solid var(--border-color);
   background-color: var(--bg-tertiary);
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   outline: none;
   min-width: 100px;
-  padding: 4px 10px;
+  padding: var(--sp-1) var(--sp-2);
   border-radius: var(--radius-full);
   transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
@@ -503,9 +504,9 @@
   background-color: var(--bg-primary);
   color: var(--text-primary);
   caret-color: var(--accent);
-  padding: 16px 20px;
+  padding: var(--sp-4) var(--sp-4);
   font-family: "JetBrains Mono", "Consolas", "Menlo", ui-monospace, monospace;
-  font-size: 13px;
+  font-size: var(--fs-md);
   line-height: 1.7;
   resize: none;
   outline: none;
@@ -517,8 +518,8 @@
 .notes-preview {
   flex: 1;
   overflow-y: auto;
-  padding: 18px 24px;
-  font-size: 14px;
+  padding: var(--sp-4) var(--sp-6);
+  font-size: var(--fs-md);
   line-height: 1.7;
   color: var(--text-primary);
   background-color: var(--bg-primary);
@@ -530,7 +531,7 @@
   margin-bottom: 0.4em;
   color: var(--text-primary);
   border-bottom: 1px solid var(--border-color);
-  padding-bottom: 4px;
+  padding-bottom: var(--sp-1);
 }
 .notes-preview.markdown-body h3 { border-bottom: none; }
 .notes-preview.markdown-body p { margin: 0.5em 0; }
@@ -541,7 +542,7 @@
 .notes-preview.markdown-body a:hover { text-decoration: underline; }
 .notes-preview.markdown-body pre {
   background-color: var(--bg-tertiary);
-  padding: 12px 14px;
+  padding: var(--sp-3) var(--sp-3);
   border-radius: var(--radius-sm);
   overflow-x: auto;
   border: 1px solid var(--border-color);
@@ -551,7 +552,7 @@
 .notes-preview.markdown-body code {
   background-color: var(--bg-tertiary);
   color: var(--accent);
-  padding: 1px 6px;
+  padding: 1px var(--sp-2);
   border-radius: var(--radius-xs);
   font-size: 0.9em;
   font-family: "JetBrains Mono", "Consolas", "Menlo", ui-monospace, monospace;
@@ -563,11 +564,11 @@
 }
 .notes-preview.markdown-body blockquote {
   border-left: 3px solid var(--accent);
-  padding: 4px 12px;
+  padding: var(--sp-1) var(--sp-3);
   color: var(--text-secondary);
   margin: 0.6em 0;
   background-color: var(--accent-dim);
-  border-radius: 0 6px 6px 0;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
 }
 .notes-preview.markdown-body ul,
 .notes-preview.markdown-body ol {
@@ -578,12 +579,12 @@
 .notes-preview.markdown-body table {
   border-collapse: collapse;
   margin: 0.8em 0;
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 .notes-preview.markdown-body th,
 .notes-preview.markdown-body td {
   border: 1px solid var(--border-color);
-  padding: 5px 12px;
+  padding: var(--sp-1) var(--sp-3);
 }
 .notes-preview.markdown-body th {
   background-color: var(--bg-tertiary);
@@ -601,8 +602,8 @@
 }
 
 .notes-source {
-  padding: 6px 14px;
-  font-size: 11px;
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-xs);
   color: var(--text-muted);
   border-top: 1px solid var(--border-color);
   background-color: var(--bg-secondary);
@@ -616,9 +617,9 @@
   transform: translateX(-50%);
   background-color: var(--bg-secondary);
   color: var(--text-primary);
-  padding: 8px 18px;
+  padding: var(--sp-2) var(--sp-4);
   border-radius: var(--radius-md);
-  font-size: 13px;
+  font-size: var(--fs-md);
   border: 1px solid var(--border-color);
   border-left: 3px solid var(--accent);
   box-shadow: var(--shadow-md);

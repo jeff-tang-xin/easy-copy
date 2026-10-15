@@ -7,8 +7,32 @@ use chrono::Utc;
 pub enum ItemType {
     #[default]
     Text,
+    /// A single URL (http/https/ftp). Classified at insert time by
+    /// `classify_text`; legacy Text entries that hold a bare URL are
+    /// re-classified on load so type filtering covers old history too.
+    Url,
     Image,
+    /// Copied file paths (CF_HDROP), one per line — the "附件" category.
     Files,
+}
+
+/// What payload kind does this text content belong to? A bare single-line
+/// URL (no whitespace, scheme-restricted) is a `Url`; everything else stays
+/// `Text`. Multi-line content is never a URL even if the first line looks
+/// like one — pasting a URL plus a note is text.
+pub fn classify_text(content: &str) -> ItemType {
+    let trimmed = content.trim();
+    if trimmed.is_empty() || trimmed.contains(char::is_whitespace) {
+        return ItemType::Text;
+    }
+    let is_url = trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+        || trimmed.starts_with("ftp://");
+    if is_url {
+        ItemType::Url
+    } else {
+        ItemType::Text
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +75,9 @@ pub struct ClipboardItem {
 impl ClipboardItem {
     pub fn new_text(content: String) -> Self {
         let now = Utc::now().timestamp_millis();
+        // Classify before the struct literal: `content` is moved into the
+        // `content` field, so the borrow must happen first.
+        let item_type = classify_text(&content);
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             content,
@@ -58,7 +85,7 @@ impl ClipboardItem {
             tags: vec![],
             saved_as_note: false,
             source_clip_id: None,
-            item_type: ItemType::Text,
+            item_type,
             favorite: false,
         }
     }
@@ -170,6 +197,9 @@ pub struct AppConfig {
     pub api_shortcut: String,
     #[serde(default = "default_true")]
     pub copy_on_double_click: bool,
+    /// 复制条目后自动隐藏主窗口（默认开，与主流剪贴板管理器一致）。
+    #[serde(default = "default_true")]
+    pub auto_hide_on_copy: bool,
     /// Optional override for the directory where all persistent data is stored
     /// (clipboard history, notes, screenshots, tools state, API collections, ...).
     /// When `None`, the OS-default app data directory is used.
@@ -230,6 +260,7 @@ impl Default for AppConfig {
             tools_shortcut: default_tools_sc(),
             screenshot_shortcut: default_screenshot_sc(),
             copy_on_double_click: true,
+            auto_hide_on_copy: true,
             storage_root: None,
             api_shortcut: default_api_sc(),
         }
@@ -593,5 +624,43 @@ mod tests {
         assert_eq!(clamp_poll_interval(MAX_POLL_INTERVAL_MS), MAX_POLL_INTERVAL_MS);
         // The serde default must itself survive clamping unchanged.
         assert_eq!(clamp_poll_interval(default_poll_interval()), default_poll_interval());
+    }
+
+    // ── classify_text / ItemType::Url ────────────────────────
+
+    #[test]
+    fn classify_text_detects_bare_urls() {
+        assert_eq!(classify_text("https://example.com/a?b=1"), ItemType::Url);
+        assert_eq!(classify_text("http://localhost:8080/api"), ItemType::Url);
+        assert_eq!(classify_text("ftp://files.example.org/pub"), ItemType::Url);
+        // Surrounding whitespace is trimmed before the check.
+        assert_eq!(classify_text("  https://example.com  "), ItemType::Url);
+    }
+
+    #[test]
+    fn classify_text_keeps_plain_text_as_text() {
+        assert_eq!(classify_text("hello world"), ItemType::Text);
+        assert_eq!(classify_text(""), ItemType::Text);
+        assert_eq!(classify_text("   "), ItemType::Text);
+        // Scheme-less domains are not URLs — too many false positives.
+        assert_eq!(classify_text("example.com"), ItemType::Text);
+        // Other schemes (file:, mailto:) stay Text for now.
+        assert_eq!(classify_text("mailto:a@b.com"), ItemType::Text);
+    }
+
+    #[test]
+    fn classify_text_never_classifies_multiline_as_url() {
+        // A URL plus anything else is text — pasting a link with a note
+        // must not hide the note from text search/filtering.
+        assert_eq!(classify_text("https://example.com\nnote"), ItemType::Text);
+        assert_eq!(classify_text("see https://example.com"), ItemType::Text);
+    }
+
+    #[test]
+    fn new_text_classifies_url_content() {
+        let item = ClipboardItem::new_text("https://example.com".into());
+        assert_eq!(item.item_type, ItemType::Url);
+        let item = ClipboardItem::new_text("just text".into());
+        assert_eq!(item.item_type, ItemType::Text);
     }
 }

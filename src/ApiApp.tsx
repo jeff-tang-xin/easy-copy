@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useRef, useState, useCallback, memo } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, memo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { JsonView } from "./JsonView";
 import { bodyFormatFor, checkBody, RAW_LANGS, type BodyCheck } from "./lib/bodyFormats";
 import { useTheme } from "./hooks/useTheme";
 import { useVerticalSplit } from "./hooks/useVerticalSplit";
-import { useToast } from "./hooks/useToast";
+import { useToast, type ToastKind } from "./hooks/useToast";
 import { friendlyError } from "./hooks/friendlyError";
 import { useDebouncedCallback } from "./hooks/useDebouncedCallback";
 import { IconChevron, IconFolder, IconHome, IconLock } from "./components/Icons";
@@ -198,6 +198,47 @@ const formatBytes = (n: number): string => {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   return `${(n / (1024 * 1024)).toFixed(2)} MB`;
 };
+
+/// `1718000000000` -> `14:32:05`（今天）或 `05-12 14:32:05`（更早）。
+/// 历史条目会跨会话持久化，所以非当天的要带上日期。
+// 导出以保留实现（当前调用点已移除；TS6133 会拦截未使用的局部声明）。
+export const formatHistoryTime = (ts: number): string => {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (v: number) => String(v).padStart(2, "0");
+  const time = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  const today = new Date();
+  if (d.getFullYear() === today.getFullYear() && d.getMonth() === today.getMonth() && d.getDate() === today.getDate()) {
+    return time;
+  }
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${time}`;
+};
+
+/// `{{name}}` 模板变量引用。名字允许两侧空白，与后端替换逻辑保持宽容一致。
+const TEMPLATE_VAR_RE = /\{\{\s*([^{}\s][^{}]*?)\s*\}\}/g;
+
+/// 收集请求里引用了、但所绑环境未定义的 `{{name}}` 变量名（去重、保持出现顺序）。
+/// 后端对未定义变量静默替换为空字符串，发送前用它点名提醒（不阻断）。
+export function findUndefinedTemplateVars(req: ApiRequest, env: ApiEnvironment | null): string[] {
+  const used = new Set<string>();
+  const scan = (s: string | null | undefined) => {
+    if (!s) return;
+    for (const m of s.matchAll(TEMPLATE_VAR_RE)) used.add(m[1]);
+  };
+  scan(req.url);
+  for (const [k, v] of req.headers) { scan(k); scan(v); }
+  for (const [k, v] of req.query) { scan(k); scan(v); }
+  if (req.body_type === "raw") scan(req.body);
+  for (const [k, v] of req.url_encoded || []) { scan(k); scan(v); }
+  for (const f of req.form_data || []) { scan(f.key); scan(f.value); }
+  // 环境自带头（如 `Authorization: Bearer {{token}}`）也会被替换，一并扫描。
+  for (const [k, v] of env?.headers ?? []) { scan(k); scan(v); }
+  if (used.size === 0) return [];
+  const defined = new Set(
+    (env?.vars ?? []).map(([k]) => k.trim().toLowerCase()).filter(Boolean)
+  );
+  return [...used].filter(name => !defined.has(name.trim().toLowerCase()));
+}
 
 /// Variable names that usually identify *which machine* an environment points
 /// at, in descending order of confidence. Matched case-insensitively.
@@ -421,6 +462,18 @@ function ContextMenu({ x, y, items, onClose }: { x: number; y: number; items: Co
       window.removeEventListener("keydown", escHandler);
     };
   }, [onClose]);
+
+  // 视口钳制：菜单渲染后测量实际尺寸，越出窗口右/下边缘时收回视口内。
+  // 之前直接用鼠标坐标定位，在窗口边缘右键时菜单会被截掉一半。
+  // 直接改 style 而不是 setState：避免一次额外的整树重渲染。
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const left = Math.max(4, Math.min(x, window.innerWidth - el.offsetWidth - 4));
+    const top = Math.max(4, Math.min(y, window.innerHeight - el.offsetHeight - 4));
+    if (left !== x) el.style.left = `${left}px`;
+    if (top !== y) el.style.top = `${top}px`;
+  }, [x, y]);
 
   return (
     <div ref={ref} className="api-context-menu" style={{ left: x, top: y }}>
@@ -713,6 +766,107 @@ function EnvManagerModal({
         </div>
       </div>
     </div>
+  );
+}
+
+// ── Modal: Cookie 管理 ─────────────────────────────────────────────
+//
+// 展示当前请求 URL 对应域名的 Cookie（api_list_cookies），并提供
+// “清除全部”（api_clear_cookies，danger 确认后执行）。
+//
+// 实现说明：沿用本文件其余模态的手写 overlay + Esc/遮罩关闭模式，
+// 而不是共享 Modal.tsx —— Modal.tsx 的 .modal-content 类与本文件的
+// .api-modal 类会互相打架，且本文件已有 4 个手写模态，窗口内保持
+// 一致优先。清除确认复用 ConfirmModal（danger 红色确认，符合设计基线），
+// 渲染在本模态之后（DOM 顺序靠后 → 同 z-index 下绘制在上层）。
+export function CookieModal({ url, onClose, showToast }: {
+  url: string;
+  onClose: () => void;
+  showToast: (msg: string, type?: ToastKind) => void;
+}) {
+  const [cookies, setCookies] = useState<string[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [clearing, setClearing] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
+
+  // 按当前 URL 拉取 Cookie 列表。cancelled 标记防止卸载后的迟到回包
+  // 覆盖新一次挂载的状态。
+  useEffect(() => {
+    let cancelled = false;
+    setCookies(null);
+    setLoadError(null);
+    invoke<string[]>("api_list_cookies", { url })
+      .then(list => { if (!cancelled) { setCookies(list); setLoadError(null); } })
+      .catch(e => { if (!cancelled) setLoadError(friendlyError(e)); });
+    return () => { cancelled = true; };
+  }, [url]);
+
+  // Esc 关闭 —— 与本文件其他模态一致。确认框打开时让位给 ConfirmModal
+  // 自己的 Esc 处理，避免一次 Esc 把两层模态全关掉。
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !confirmClear) onClose();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose, confirmClear]);
+
+  const handleClearAll = async () => {
+    setClearing(true);
+    try {
+      await invoke("api_clear_cookies");
+      setCookies([]);
+      setConfirmClear(false);
+      showToast("已清除全部 Cookie", "success");
+    } catch (e) {
+      showToast(`清除 Cookie 失败: ${friendlyError(e)}`, "error");
+    } finally {
+      setClearing(false);
+    }
+  };
+
+  return (
+    <>
+      <div className="api-modal-overlay" onMouseDown={onClose}>
+        <div className="api-modal api-cookie-modal" onMouseDown={e => e.stopPropagation()}>
+          <div className="api-modal-title">Cookie 管理</div>
+          <div className="api-cookie-url" title={url}>{url || "（当前请求未填写 URL）"}</div>
+          {loadError ? (
+            <div className="api-error">读取 Cookie 失败：{loadError}</div>
+          ) : cookies === null ? (
+            <div className="api-cookie-empty">读取中…</div>
+          ) : cookies.length === 0 ? (
+            <div className="api-cookie-empty">该地址暂无 Cookie。</div>
+          ) : (
+            <div className="api-cookie-list">
+              {cookies.map((c, i) => (
+                <div key={i} className="api-cookie-row" title={c}>{c}</div>
+              ))}
+            </div>
+          )}
+          <div className="api-modal-actions">
+            <button
+              className="api-btn api-btn-danger"
+              onClick={() => setConfirmClear(true)}
+              disabled={clearing || cookies === null || cookies.length === 0}
+            >
+              {clearing ? "清除中…" : "清除全部"}
+            </button>
+            <button className="api-btn api-btn-secondary" onClick={onClose}>关闭</button>
+          </div>
+        </div>
+      </div>
+      {confirmClear && (
+        <ConfirmModal
+          title="清除 Cookie"
+          message={`确认清除该地址的全部 Cookie？\n此操作影响整个应用的 Cookie 存储，且不可撤销。`}
+          confirmText="清除"
+          danger
+          onConfirm={handleClearAll}
+          onCancel={() => setConfirmClear(false)}
+        />
+      )}
+    </>
   );
 }
 
@@ -1559,12 +1713,16 @@ interface ResponseViewerProps {
   response: ApiResponse | null;
   loading: boolean;
   error: string | null;
+  /** Past responses for this request (newest first). Empty/undefined hides the tab. */
+  history?: ApiResponse[];
+  /** User clicked a history entry — swap it into the viewer (read-only echo). */
+  onPickHistory?: (resp: ApiResponse) => void;
 }
 
-function ResponseViewer({ response, loading, error }: ResponseViewerProps) {
-  const [tab, setTab] = useState<"body" | "headers" | "request">("body");
+function ResponseViewer({ response, loading, error, history, onPickHistory }: ResponseViewerProps) {
+  const [tab, setTab] = useState<"body" | "headers" | "request" | "history">("body");
   const [view, setView] = useState<"pretty" | "raw" | "text">("pretty");
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<null | "ok" | "fail">(null);
   // Binary download state. Kept here rather than in the parent because it is
   // purely presentational and must reset whenever a new response arrives.
   const [saving, setSaving] = useState(false);
@@ -1675,9 +1833,12 @@ function ResponseViewer({ response, loading, error }: ResponseViewerProps) {
       : response.body;
     try {
       await navigator.clipboard.writeText(text);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1200);
-    } catch { /* clipboard denied — nothing useful to say */ }
+      setCopied("ok");
+    } catch {
+      // 剪贴板被拒（WebView 权限/焦点问题）：静默会让用户以为点了没生效。
+      setCopied("fail");
+    }
+    window.setTimeout(() => setCopied(null), 1200);
   };
 
   return (
@@ -1716,9 +1877,27 @@ function ResponseViewer({ response, loading, error }: ResponseViewerProps) {
         <button className={`api-tab${tab === "request" ? " active" : ""}`} onClick={() => setTab("request")}>
           请求头{response.request_headers.length > 0 && <span className="api-tab-badge">{response.request_headers.length}</span>}
         </button>
+        {(history?.length ?? 0) > 0 && (
+          <button className={`api-tab${tab === "history" ? " active" : ""}`} onClick={() => setTab("history")}>
+            历史<span className="api-tab-badge">{history!.length}</span>
+          </button>
+        )}
       </div>
 
       <div className="api-response-content">
+        {tab === "history" && (
+          <div className="api-history-list">
+            <div className="api-hint">点击任一条目在上方查看该次响应（仅回显，不影响已保存的结果）。</div>
+            {(history ?? []).map((h, i) => (
+              <button key={i} className="api-history-row" onClick={() => onPickHistory?.(h)} title="点击查看这次响应">
+                <span className={`api-status ${STATUS_CLASS(h.status)}`}>{h.status}</span>
+                <span className="api-history-time">{formatHistoryTime(h.timestamp)}</span>
+                <span className="api-duration">{h.duration_ms}ms</span>
+                {h.error && <span className="api-error-inline">⚠ {h.error}</span>}
+              </button>
+            ))}
+          </div>
+        )}
         {tab === "body" && (
           <>
             {response.is_binary ? (
@@ -1758,7 +1937,9 @@ function ResponseViewer({ response, loading, error }: ResponseViewerProps) {
                       <button className={view === "text" ? "active" : ""} onClick={() => setView("text")}>缩进文本</button>
                     )}
                   </div>
-                  <button className="api-copy-btn" onClick={copyBody}>{copied ? "已复制" : "复制"}</button>
+                  <button className={`api-copy-btn${copied === "fail" ? " is-fail" : ""}`} onClick={copyBody}>
+                    {copied === "ok" ? "已复制" : copied === "fail" ? "复制失败" : "复制"}
+                  </button>
                 </div>
                 {response.truncated && (
                   <div className="api-warning-row">
@@ -1830,6 +2011,15 @@ export default function ApiApp() {
   const [sending, setSending] = useState(false);
   const [response, setResponse] = useState<ApiResponse | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
+  // 响应区跟随左侧选中：response/sendError 是全局单值，切换节点时必须
+  // 重置，否则节点 B 会显示节点 A 的响应/错误。渲染处另有
+  // `response ?? history[0]` 回退——切到有历史的节点回显其最近一次响应。
+  useEffect(() => {
+    setResponse(null);
+    setSendError(null);
+  }, [selectedId]);
+  // selectedIdRef（渲染期同步的选中 id）在下方 updateRequest 处定义，
+  // sendRequest 的回复落地复用它校验「用户还停在发起节点上」。
   const [activeTab, setActiveTab] = useState<"headers" | "query" | "path" | "body" | "settings">("headers");
 
   // Modal state
@@ -1838,6 +2028,7 @@ export default function ApiApp() {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
   const [moveToModal, setMoveToModal] = useState<{ node: ApiNode } | null>(null);
   const [envModalOpen, setEnvModalOpen] = useState(false);
+  const [cookieModalOpen, setCookieModalOpen] = useState(false);
 
   // Shared toast hook. Identical to the clipboard window's: de-dupes the
   // same message text, clears its own timer on unmount, and renders the
@@ -2366,12 +2557,27 @@ export default function ApiApp() {
   // symptoms disappear if a reply is ignored unless it belongs to the
   // most recent send.
   const sendSeq = useRef(0);
+  // 发起发送时的节点 id：渲染层用它判定「发送中」只对发起节点成立
+  //（sendingForSelected），切换节点后新节点不背旧请求的 spinner。
+  const sendNodeIdRef = useRef<string | null>(null);
 
   const sendRequest = useCallback(async () => {
     const node = selectedNode;
     if (!node?.request) return;
+    // 发送中守卫：发送按钮的 disabled 只挡得住鼠标，URL 栏回车（onEnter）
+    // 会绕过它——连按回车会把同一个 POST 真的发多次。只拦「本节点在飞」，
+    // 切到别的节点仍可立即发送（与 sendingForSelected 的语义一致）。
+    if (sending && sendNodeIdRef.current === node.id) return;
     const req = node.request;
     const seq = ++sendSeq.current;
+    sendNodeIdRef.current = node.id;
+    // 未定义变量点名提醒（不阻断发送）：后端对 {{var}} 静默替换为空，
+    // 用户只见连接失败无线索。发送前扫一遍 URL/headers/body/环境头。
+    const reqEnv = state.envs.find(e => e.id === req.env_id) ?? null;
+    const undefinedVars = findUndefinedTemplateVars(req, reqEnv);
+    if (undefinedVars.length > 0) {
+      showToast(`未定义的环境变量: ${undefinedVars.map(v => `{{${v}}}`).join(" ")}（将按空值替换）`, "warning");
+    }
     setSending(true);
     setSendError(null);
     setResponse(null);
@@ -2407,6 +2613,9 @@ export default function ApiApp() {
       const resp = await invoke<ApiResponse>("api_execute", { request: cleanReq });
       // A newer send superseded us — drop this reply entirely.
       if (seq !== sendSeq.current) return;
+      // 用户已切到别的节点：响应照旧写入发起节点的 history（下方），
+      // 但不抢占当前视图——否则 B 的响应区会闪现 A 的结果。
+      if (selectedIdRef.current !== node.id) return;
       setResponse(resp);
       // History is owned by the front-end. The backend used to append it
       // too, matching the node by URL+method (wrong node when two share a
@@ -2426,13 +2635,27 @@ export default function ApiApp() {
       });
     } catch (e: any) {
       if (seq !== sendSeq.current) return;
+      if (selectedIdRef.current !== node.id) return;
       setSendError(friendlyError(e));
     } finally {
       // Only the latest send is allowed to clear the spinner, otherwise a
       // slow earlier reply switches it off while a newer one is running.
       if (seq === sendSeq.current) setSending(false);
     }
-  }, [selectedNode, saveNode]);
+  }, [selectedNode, saveNode, state.envs, showToast, sending]);
+
+  // Ctrl/⌘+Enter 全局发送：body 编辑区聚焦时也能发，不用回 URL 栏。
+  // 挂在 window 上（而非容器 div），textarea 里按键也会冒泡到这里。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+        e.preventDefault();
+        sendRequest();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [sendRequest]);
 
   // ── Environment operations ───────────────────────────────────
   //
@@ -2565,6 +2788,9 @@ export default function ApiApp() {
   }
 
   const ownHeaderCount = req?.headers?.filter(([k]) => k.trim()).length || 0;
+  // 「发送中」只对发起它的那个节点成立——切换后新节点不显示旧请求的
+  // spinner，发送按钮也不被全局 sending 禁用（否则 A 在飞时 B 无法发送）。
+  const sendingForSelected = sending && sendNodeIdRef.current === selectedId;
   const headerCount = ownHeaderCount + inheritedHeaders.length;
   const queryCount = req?.query?.filter(([k]) => k.trim()).length || 0;
   const pathCount = req?.path_vars?.filter(([k]) => k.trim()).length || 0;
@@ -2681,8 +2907,15 @@ export default function ApiApp() {
                 onCommit={url => updateRequest({ url })}
                 onEnter={sendRequest}
               />
-              <button className="api-send-btn" onClick={sendRequest} disabled={sending || !req.url.trim()}>
-                {sending ? "发送中..." : "发送"}
+              <button className="api-send-btn" onClick={sendRequest} disabled={sendingForSelected || !req.url.trim()}>
+                {sendingForSelected ? "发送中..." : "发送"}
+              </button>
+              <button
+                className="api-btn api-btn-secondary"
+                onClick={() => setCookieModalOpen(true)}
+                title="查看/清除当前请求域名的 Cookie"
+              >
+                Cookie
               </button>
             </div>
 
@@ -2863,12 +3096,29 @@ export default function ApiApp() {
 
       {/* ── Response (right) ── */}
       <div className="api-response">
-        <ResponseViewer response={response} loading={sending} error={sendError} />
+        <ResponseViewer
+          // 跟随左侧选中：优先显示「当前响应」（发送结果/点选的历史条目），
+          // 否则回退到该节点自己最近一次响应——切到 B 立刻看到 B 的数据，
+          // 而不是残留 A 的。
+          response={response ?? selectedNode?.request?.history?.[0] ?? null}
+          loading={sendingForSelected}
+          error={sendError}
+          history={selectedNode?.request?.history ?? []}
+          onPickHistory={setResponse}
+        />
       </div>
 
       {/* ── Modals ── */}
       {toast && (
         <div className={`toast toast-${toast.type}`}>{toast.msg}</div>
+      )}
+
+      {cookieModalOpen && (
+        <CookieModal
+          url={selectedNode?.request?.url ?? ""}
+          onClose={() => setCookieModalOpen(false)}
+          showToast={showToast}
+        />
       )}
 
       {/* Rendered before the generic modals on purpose: `addEnv` / `deleteEnv`
@@ -2923,4 +3173,3 @@ export default function ApiApp() {
     </div>
   );
 }
-// DEBUG_MARKER_FIX_1

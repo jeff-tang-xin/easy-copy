@@ -85,16 +85,16 @@
 }
 
 html[data-theme="dark"] {
-  --bg-primary: #16161e;
-  --bg-secondary: #1a1b26;
-  --bg-tertiary: #1f2335;
-  --bg-hover: #292e42;
-  --bg-active: #363b54;
+  --bg-primary: #1f2335;
+  --bg-secondary: #24283b;
+  --bg-tertiary: #292e42;
+  --bg-hover: #343a55;
+  --bg-active: #3b4261;
   /* Half-transparent rather than solid #2f334d: a fixed border colour reads
    * as a hard seam when the surfaces it separates differ in lightness. */
-  --border-color: rgba(192, 202, 245, 0.09);
-  --border-subtle: rgba(192, 202, 245, 0.05);
-  --text-primary: #c0caf5;
+  --border-color: rgba(192, 202, 245, 0.12);
+  --border-subtle: rgba(192, 202, 245, 0.07);
+  --text-primary: #b6bdd4;
   --text-secondary: #a9b1d6;
   /* WCAG 2.1 AA。旧值 #565f89 对 --bg-primary 仅 2.91:1，远低于正文所需的
      4.5:1 —— 而这个令牌是全库最高频的文字色（70 处 `color:` 引用），时间戳、
@@ -105,8 +105,24 @@ html[data-theme="dark"] {
   --accent: #7aa2f7;
   --accent-hover: #89b4ff;
   --accent-dim: rgba(122, 162, 247, 0.12);
+  /* 实色底（accent/green/red 按钮、徽章）上的文字与图标色。此前 5 个窗口
+     各自裸写 #fff，语义分散且无法随主题调整。
+     取深色而非白色：Tokyo Night 的实色全是中等亮度（accent #7aa2f7 亮度
+     ≈0.36、green ≈0.55），白字对比仅 1.8~2.6:1（AA 需 4.5:1），深底色文字
+     对比 6.9~10:1 全面达标。 */
+  --text-on-accent: var(--bg-primary);
+  /* accent 的 hover 填充态（比 --accent-dim 更实一档）。截图工具条等
+     悬浮在图像上的控件需要比页面内 hover 更强的可见性。 */
+  --accent-soft: rgba(122, 162, 247, 0.2);
+  /* 毛玻璃悬浮层底色：--bg-secondary 的 alpha 形式。此前 ScreenshotApp
+     裸写 rgba(24,24,37,x)/rgba(30,30,46,x) 两个近似值，色相漂移。 */
+  --bg-glass: rgba(31, 35, 53, 0.85);
+  /* 弹窗遮罩。此前主窗口 0.6、Api 0.5、Tools 0.55 三个值并存。 */
+  --overlay-bg: rgba(0, 0, 0, 0.6);
   --green: #9ece6a;
   --orange: #e0af68;
+  /* orange 的 hover 亮变体（exec-btn-open:hover 此前裸写同值）。 */
+  --orange-hover: #f0b878;
   --red: #f7768e;
   --yellow: #e0af68;
   --danger-bg: rgba(247, 118, 142, 0.15);
@@ -114,10 +130,24 @@ html[data-theme="dark"] {
   --danger-border: rgba(247, 118, 142, 0.4);
   --success-bg: rgba(158, 206, 106, 0.14);
   --success-border: rgba(158, 206, 106, 0.32);
-  --img-bg: #13101c;
-  --scrollbar-track: #1a1b26;
-  --scrollbar-thumb: #363b54;
-  --scrollbar-hover: #414868;
+  --img-bg: #191b29;
+  --scrollbar-track: #1f2335;
+  --scrollbar-thumb: #3b4261;
+  --scrollbar-hover: #47507a;
+  /* 卡片底：深色下卡片比画布亮一档（浮起）；浅色下卡片用近白（画布是
+     纸感灰）——两主题的「浮起」方向相反，故单独成 token。 */
+  --card-bg: var(--bg-tertiary);
+  /* 类型色彩编码（列表条目的类型图标）：明快感的来源——每条记录一个
+     彩色小图标，列表有节奏。取 Tokyo Night cyan/magenta，浅色用加深版
+     保证图形对比 ≥3:1。 */
+  --type-text: var(--accent);
+  --type-url: var(--cyan, #7dcfff);
+  --type-image: var(--magenta, #bb9af7);
+  --type-files: var(--orange);
+  --cyan: #7dcfff;
+  --magenta: #bb9af7;
+  /* 顶栏品牌色微渐变：若有若无的蓝调洗色，给中性灰头部一点精神。 */
+  --brand-wash: linear-gradient(180deg, rgba(122, 162, 247, 0.05), transparent 70%);
 
   /* Elevation. Dark themes can't lean on grey drop-shadows — they vanish
    * against a dark canvas — so depth comes from a near-black shadow plus a
@@ -144,31 +174,37 @@ html[data-theme="dark"] {
 }
 
 html[data-theme="light"] {
-  /* Pure #f5f5f5 grey reads as a 2010-era control panel. Lifting the canvas
-   * to near-white with a faint blue cast is most of what separates a modern
-   * light theme from a dated one. */
-  --bg-primary: #fbfbfd;
-  --bg-secondary: #ffffff;
-  --bg-tertiary: #f2f3f7;
-  --bg-hover: #ebedf3;
-  --bg-active: #e1e4ec;
+  /* 蓝白调画布：纯白配近黑正文对比 12.9:1 刺眼，纯灰画布又闷（用户
+   * 反馈「偏灰」）。#f3f7fd 带品牌蓝相——通透明快，正文对比 9.79:1
+   * 仍落 7~10 舒适区。卡片层 #fdfeff 接近纯白，在蓝调画布上浮起。 */
+  --bg-primary: #f3f7fd;
+  --bg-secondary: #fdfeff;
+  --bg-tertiary: #e9f0fa;
+  --bg-hover: #e3edf9;
+  --bg-active: #d8e5f5;
   /* The single highest-impact token here. A solid mid-grey border repeated
    * across ~140 `1px solid` call sites was the dominant source of the dated
    * look. Half-transparent ink adapts to whatever sits beneath it, so
    * stacked surfaces stop fighting each other. */
-  --border-color: rgba(44, 47, 58, 0.1);
+  --border-color: rgba(44, 47, 58, 0.08);
   /* One step fainter than --border-color: for dividers and internal grids,
    * which shouldn't carry the same weight as a control outline. */
-  --border-subtle: rgba(44, 47, 58, 0.06);
-  --text-primary: #2c2f3a;
-  --text-secondary: #4c505e;
+  --border-subtle: rgba(44, 47, 58, 0.05);
+  --text-primary: #3a3f4c;
+  --text-secondary: #5a5f6d;
   /* WCAG 2.1 AA。旧值 #868c9c 对 --bg-primary 仅 3.25:1，只够大号文字
      （AA-large，≥3:1），正文不达标。降深到 #666a77 后对 primary/tertiary/
      hover 三种承载面分别为 5.22 / 4.86 / 4.61，全部 ≥4.5 且色相与蓝灰一致。 */
-  --text-muted: #666a77;
-  --accent: #3768c7;
-  --accent-hover: #5081e8;
-  --accent-dim: rgba(61, 111, 214, 0.08);
+  --text-muted: #6b7080;
+  --accent: #409eff;
+  --accent-hover: #66b1ff;
+  --accent-dim: rgba(64, 158, 255, 0.12);
+  /* 实色底文字：亮蓝 #409eff 上白字仅 2.78:1，深字 4.80:1 达 AA——
+     与深色主题同一逻辑（中等亮度实色一律配深字）。注意这里刻意
+     保持 #2c2f3a 而非跟随 --text-primary 提亮：按钮底是高饱和亮色，
+     文字必须足够深才压得住（#3a3f4c 只有 3.79:1）。 */
+  --text-on-accent: #2c2f3a;
+  --accent-soft: rgba(64, 158, 255, 0.15);
   /* 支柱一「10% 功能色」的 WCAG 2.1 硬性要求。这四个令牌同时扮演两种角色：
      当文字色（`color:`，共 42 处）和当填充底承载 #fff 白字（toast / tag-chip）。
      旧值在浅色画布上普遍不达标 —— orange 2.66:1、yellow 2.71:1 属明显违规，
@@ -183,8 +219,16 @@ html[data-theme="light"] {
   --danger-border: rgba(214, 74, 94, 0.32);
   --success-bg: rgba(58, 156, 90, 0.12);
   --success-border: rgba(58, 156, 90, 0.3);
-  --img-bg: #f0f0f4;
-  --scrollbar-track: #eceef2;
+  --img-bg: #e9f0fa;
+  --scrollbar-track: #e7eef8;
+  --card-bg: var(--bg-secondary);
+  --type-text: #2e86d6;  /* accent #409eff 对卡片白仅 2.71，图标加深一档 */
+  --type-url: #0e8fb5;
+  --type-image: #9061c2;
+  --type-files: #925f1f;
+  --cyan: #0e8fb5;
+  --magenta: #9061c2;
+  --brand-wash: linear-gradient(180deg, rgba(64, 158, 255, 0.06), transparent 70%);
   --scrollbar-thumb: rgba(44, 47, 58, 0.18);
   --scrollbar-hover: rgba(44, 47, 58, 0.28);
 
@@ -237,8 +281,9 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 12px;
+  padding: 8px 12px;
   background-color: var(--bg-secondary);
+  background-image: var(--brand-wash);
 }
 
 .search-wrapper {
@@ -298,6 +343,43 @@ body {
 .clear-btn:hover {
   background-color: var(--danger-hover);
   color: var(--red);
+}
+
+/* ===== Type filter chips ===== */
+.type-filter {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-hover);
+}
+
+.type-chip {
+  padding: 4px 10px;
+  border: none;
+  border-radius: calc(var(--radius-md) - 2px);
+  background-color: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all var(--dur) var(--ease);
+}
+
+.type-chip:hover {
+  color: var(--text-primary);
+}
+
+.type-chip.active {
+  background-color: var(--accent);
+  color: var(--text-on-accent);
+}
+
+.type-chip:focus-visible {
+  outline: 2px solid var(--accent-dim);
+  outline-offset: 1px;
 }
 
 /* ===== List ===== */
@@ -361,11 +443,11 @@ body {
      小而空隙大、比例失衡。纵向 6→8px 与 gap 对齐到同一档，横向 10→12px
      保持略宽于纵向（文字左右需要比上下更多留白才不贴边）。 */
   padding: var(--sp-2) var(--sp-3);
-  background-color: var(--bg-tertiary);
-  /* 边框保持存在但透明：一整列都描 1px 实线时，列表会读成一张表格网格，
-     那是"复古"观感最主要的结构性来源。留 transparent 而非直接删除，是为了
-     让 :hover / .selected 切换边框色时不产生 1px 的布局跳动。 */
-  border: 1px solid transparent;
+  background-color: var(--card-bg);
+  /* 常显极轻边框：卡片与画布靠「白底 + 轻描」双重区分，行与行界限分明。
+     此前 transparent 边框 + 近画布底色，卡片连成一片（用户反馈）。
+     仍是 1px 常驻结构，:hover / .selected 切换边框色无布局跳动。 */
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   cursor: pointer;
   transition: background-color var(--dur-fast) var(--ease),
@@ -380,7 +462,7 @@ body {
      ⚠️ 占位值取"典型卡高"而非最大值，且必须与上面的 padding、
      .item-content 的 max-height 同批调整——只改其一会让滚动条长度跳动。 */
   content-visibility: auto;
-  contain-intrinsic-size: auto 68px;
+  contain-intrinsic-size: auto 64px;
 }
 
 /* 图片卡多一块缩略图，占位高度单独给一个更接近实测值的初值。 */
@@ -392,6 +474,7 @@ body {
    此前 hover 描 --text-muted 实边框，在无边框的静息态旁边显得过重。 */
 .item-card:hover {
   background-color: var(--bg-hover);
+  border-color: var(--border-color);
 }
 
 .item-card:active {
@@ -406,10 +489,12 @@ body {
 }
 
 .item-content {
-  color: var(--text-secondary);
+  color: var(--text-primary);
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 56px;
+  /* 2 行预览（2 × 1.4 行高）：剪贴板条目一眼可辨即可，全文有预览弹窗。
+     用 em 而非 px——行高的整数倍，不会在第三行切出半截字。 */
+  max-height: 2.8em;
   overflow: hidden;
   font-size: var(--fs-md);
   line-height: 1.4;
@@ -429,7 +514,7 @@ body {
   justify-content: flex-end;
   align-items: center;
   gap: 2px;
-  margin-top: 3px;
+  margin-top: 2px;
 }
 
 .item-type-badge {
@@ -493,7 +578,7 @@ body {
   left: 50%;
   transform: translate(-50%, -50%);
   background-color: var(--accent);
-  color: #fff;
+  color: var(--text-on-accent);
   padding: 6px 18px;
   border-radius: var(--radius-sm);
   font-size: 13px;
@@ -504,7 +589,7 @@ body {
 
 /* ===== Favorited ===== */
 .item-card.favorited {
-  /* ⚠️ 左侧总宽必须等于普通卡片的 1px(透明边框) + 12px(--sp-3) = 13px，
+  /* ⚠️ 左侧总宽必须等于普通卡片的 1px(常显轻边框) + 12px(--sp-3) = 13px，
      否则收藏卡的文字会相对其他卡片横向错开，垂直列表里一眼可见。
      这里 4px 实边框 + 9px 内距 = 13px 对齐。
      9px 不在 4px 网格上，但对齐优先于栅格洁癖——栅格是手段，
@@ -620,11 +705,11 @@ body {
 
 .file-name.clickable-path:hover {
   background-color: var(--accent);
-  color: #fff;
+  color: var(--text-on-accent);
 }
 
 .file-name.clickable-path:hover .file-basename {
-  color: #fff;
+  color: var(--text-on-accent);
 }
 
 .file-name.is-exec {
@@ -650,7 +735,7 @@ body {
 
 /* ===== Footer ===== */
 .footer {
-  padding: 6px 12px;
+  padding: 4px 12px;
   background-color: var(--bg-secondary);
   border-top: 1px solid var(--border-subtle);
   display: flex;
@@ -767,7 +852,7 @@ body.dragging {
   border: none;
   border-radius: var(--radius-sm);
   background: rgba(255, 255, 255, 0.08);
-  color: #fff;
+  color: #fff; /* 图片上的悬浮控件：底随图片内容，白字不随主题 */
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -807,12 +892,37 @@ body.dragging {
 
 .toast-success {
   background: var(--green);
-  color: #fff;
+  color: var(--text-on-accent);
 }
 
 .toast-error {
   background: var(--red);
-  color: #fff;
+  color: var(--text-on-accent);
+  /* Error messages carry paths, status codes and hints — clipping them at
+     one line made long backend failures unreadable (the user saw
+     "…保存失败: EPERM: operation not permit" and nothing else). Allow up
+     to 4 lines instead. */
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-align: center;
+  line-height: var(--lh-body);
+}
+
+.toast-warning {
+  background: var(--orange);
+  /* White on #e0af68 is ~1.9:1 — unreadable. Dark text on the amber
+     background clears 8:1. */
+  color: var(--text-on-accent);
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-align: center;
+  line-height: var(--lh-body);
 }
 
 @keyframes toast-slide-in {
@@ -868,7 +978,7 @@ body.dragging {
 
 .tag-chip.active {
   background: var(--orange);
-  color: #fff;
+  color: var(--text-on-accent);
   border-color: var(--orange);
 }
 
@@ -1034,7 +1144,7 @@ body.dragging {
   border: none;
   border-radius: var(--radius-md);
   background: var(--orange);
-  color: #fff;
+  color: var(--text-on-accent);
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
@@ -1042,7 +1152,7 @@ body.dragging {
 }
 
 .exec-btn-open:hover {
-  background: #f0b878;
+  background: var(--orange-hover);
 }
 
 /* ===== URL Link ===== */
@@ -1064,7 +1174,7 @@ body.dragging {
   position: sticky;
   top: 0;
   z-index: 5;
-  padding: 6px 8px 3px;
+  padding: 4px 8px 2px;
   font-size: var(--fs-xs);
   font-weight: 600;
   color: var(--text-muted);
@@ -1073,6 +1183,18 @@ body.dragging {
      标签不产生任何视觉效果，只会拉宽字距显得刻板；分割线也去掉，靠上方留白
      分组即可 —— 每组都描一条线会把列表重新变回表格。 */
   margin-bottom: 2px;
+}
+
+/* accent 小圆点：分组标记的一点品牌色，列表节奏的锚。 */
+.group-header::before {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: var(--radius-full);
+  background-color: var(--accent);
+  margin-right: 6px;
+  vertical-align: 2px;
 }
 
 /* ===== Tag Autocomplete ===== */
@@ -1162,7 +1284,7 @@ body.dragging {
   border: none;
   border-radius: var(--radius-sm);
   background: var(--accent);
-  color: #fff;
+  color: var(--text-on-accent);
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
@@ -1346,6 +1468,17 @@ body.dragging {
   margin-top: 20px;
   padding-top: 16px;
   border-top: 1px solid var(--border-color);
+  /* 弹窗限高滚动后 footer 仍常驻可视区：sticky 贴住滚动容器底缘，
+     负 bottom 补偿 dialog 的 24px padding；不透明背景遮住滚过的内容。 */
+  position: sticky;
+  bottom: -24px;
+  margin-left: -24px;
+  margin-right: -24px;
+  padding-left: 24px;
+  padding-right: 24px;
+  padding-bottom: 24px;
+  background: var(--bg-secondary);
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
 }
 .settings-storage-row {
   display: flex;
@@ -1399,9 +1532,9 @@ body.dragging {
     border-color var(--dur-fast) var(--ease);
 }
 .preview-tab.active {
-  background: var(--accent, #4a9eff);
-  color: #fff;
-  border-color: var(--accent, #4a9eff);
+  background: var(--accent);
+  color: var(--text-on-accent);
+  border-color: var(--accent);
 }
 .preview-lang-picker {
   display: flex;
@@ -1423,7 +1556,7 @@ body.dragging {
 }
 .preview-lang-select:focus {
   outline: none;
-  border-color: var(--accent, #4a9eff);
+  border-color: var(--accent);
 }
 
 /* 内容超长导致高亮被禁用时的常驻说明文案。用 --text-secondary 保持次要信息
@@ -1492,7 +1625,7 @@ body.dragging {
 }
 .preview-markdown pre code { background: none; padding: 0; }
 .preview-markdown blockquote {
-  border-left: 3px solid var(--accent, #4a9eff);
+  border-left: 3px solid var(--accent);
   padding-left: 10px;
   margin: 0.5em 0;
   color: var(--text-secondary);
@@ -1503,7 +1636,7 @@ body.dragging {
   border: 1px solid var(--border-color);
   padding: 4px 8px;
 }
-.preview-markdown a { color: var(--accent, #4a9eff); text-decoration: none; }
+.preview-markdown a { color: var(--accent); text-decoration: none; }
 .preview-markdown a:hover { text-decoration: underline; }
 .preview-markdown hr { border: none; border-top: 1px solid var(--border-subtle); margin: 1em 0; }
 .preview-code { height: 100%; font-size: var(--fs-md); overflow: auto; }
@@ -1539,6 +1672,17 @@ select:focus-visible,
   box-shadow: var(--ring);
 }
 
+/* ===== 全局禁用态 =====
+   此前全库没有任何 disabled 视觉样式：上下文菜单里"已存为笔记"、设置里
+   保存中的按钮，外观与可点状态完全相同，点了没反应会被当成坏了。
+   Element 规范：禁用 = 降透明度 + not-allowed 光标，让"不可点"一眼可辨。
+   放在文件末尾以覆盖前面同权重的具体按钮样式。 */
+button:disabled,
+button[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 /* ===== 降低动效偏好兜底 =====
    系统开启「减少动态效果」时，把动画/过渡压到近似瞬时（而非 0，0 在部分
    浏览器会导致 transitionend 不触发，依赖该事件的逻辑会卡死）。 */
@@ -1552,3 +1696,9 @@ select:focus-visible,
     scroll-behavior: auto !important;
   }
 }
+
+/* ── 类型色彩编码：条目类型图标的语义色 ── */
+.item-type-badge.type-text { color: var(--type-text); }
+.item-type-badge.type-url { color: var(--type-url); }
+.item-type-badge.type-image { color: var(--type-image); }
+.item-type-badge.type-files { color: var(--type-files); }

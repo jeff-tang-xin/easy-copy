@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   IconSettings, IconExport, IconImport,
@@ -18,6 +18,88 @@ interface SettingsDialogProps {
   onImport?: () => void;
 }
 
+/** Format a KeyboardEvent as a "Ctrl+Shift+V" style combo, or null while only modifiers are held. */
+function formatCombo(e: React.KeyboardEvent): string | null {
+  const key = e.key;
+  if (key === "Control" || key === "Shift" || key === "Alt" || key === "Meta") {
+    return null; // Modifier pressed alone — wait for the actual key.
+  }
+  const parts: string[] = [];
+  if (e.ctrlKey) parts.push("Ctrl");
+  if (e.shiftKey) parts.push("Shift");
+  if (e.altKey) parts.push("Alt");
+  if (e.metaKey) parts.push("Super");
+  if (key === " ") parts.push("Space");
+  else if (key.length === 1) parts.push(key.toUpperCase());
+  else parts.push(key); // "F2", "ArrowUp", "Home", …
+  return parts.join("+");
+}
+
+/**
+ * Shortcut field with an explicit record button: clicking it focuses the input
+ * and captures the next key combo ("Ctrl+Shift+V" format). Esc cancels
+ * recording; without the button the input still accepts plain manual typing.
+ */
+function ShortcutInput({
+  value,
+  onChange,
+  placeholder,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+}) {
+  const [recording, setRecording] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const startRecording = () => {
+    setRecording(true);
+    inputRef.current?.focus();
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!recording) return; // Plain typing path — leave the input alone.
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      setRecording(false);
+      return;
+    }
+    const combo = formatCombo(e);
+    if (combo === null) {
+      e.preventDefault(); // Modifier alone: swallow so it doesn't type.
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    onChange(combo);
+    setRecording(false);
+  };
+
+  return (
+    <div className="shortcut-field">
+      <input
+        ref={inputRef}
+        className={`settings-input${recording ? " recording" : ""}`}
+        type="text"
+        placeholder={recording ? "按下组合键…" : placeholder}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={handleKeyDown}
+        onBlur={() => setRecording(false)}
+      />
+      <button
+        type="button"
+        className="shortcut-record-btn"
+        onClick={startRecording}
+        title="点击后按下想要的组合键"
+      >
+        {recording ? "录制中…" : "录制"}
+      </button>
+    </div>
+  );
+}
+
 export function SettingsDialog({
   open,
   onClose,
@@ -35,6 +117,7 @@ export function SettingsDialog({
     screenshot_shortcut: "Ctrl+Shift+S",
     api_shortcut: "Ctrl+Shift+U",
     copy_on_double_click: true,
+    auto_hide_on_copy: true,
     storage_root: null,
   });
   const [loading, setLoading] = useState(false);
@@ -54,6 +137,9 @@ export function SettingsDialog({
   // that reason; do not rely on unmounting to clear them.
   const [maxItemsDraft, setMaxItemsDraft] = useState<string | null>(null);
   const [pollDraft, setPollDraft] = useState<string | null>(null);
+  // Snapshot of the last-loaded/saved config, used to detect unsaved edits:
+  // backdrop clicks must not silently discard them (cancel button still can).
+  const [baseline, setBaseline] = useState<AppConfig | null>(null);
 
   // Load config whenever the dialog opens.
   useEffect(() => {
@@ -64,7 +150,11 @@ export function SettingsDialog({
     let cancelled = false;
     setLoading(true);
     invoke<AppConfig>("get_config")
-      .then((c) => { if (!cancelled) setConfig(c); })
+      .then((c) => {
+        if (cancelled) return;
+        setConfig(c);
+        setBaseline(c);
+      })
       .catch((e) => showToast(friendlyError(e, "加载配置失败"), "error"))
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
@@ -118,6 +208,7 @@ export function SettingsDialog({
     setSaving(true);
     try {
       await invoke("set_config", { config: merged });
+      setBaseline(merged);
       showToast("设置已保存");
       onSaved?.(merged);
       onClose();
@@ -140,8 +231,21 @@ export function SettingsDialog({
     }
   };
 
+  // Backdrop clicks must not silently discard unsaved edits — steer the user
+  // to the Save/Cancel buttons instead (Esc is already swallowed by App's
+  // global handler while settings are open, so backdrop is the only risk).
+  const hasUnsavedChanges =
+    baseline !== null && JSON.stringify(config) !== JSON.stringify(baseline);
+  const requestClose = () => {
+    if (hasUnsavedChanges) {
+      showToast("有未保存的修改，请点击「保存」或「取消」", "error");
+      return;
+    }
+    onClose();
+  };
+
   return (
-    <div className="modal-overlay" onClick={onClose}>
+    <div className="modal-overlay" onClick={requestClose}>
       <div className="settings-dialog" onClick={(e) => e.stopPropagation()}>
         <h3 className="settings-title">
           <IconSettings /> 设置
@@ -195,68 +299,66 @@ export function SettingsDialog({
               </span>
             </div>
 
+            <div className="settings-row settings-row-toggle">
+              <label className="settings-label" htmlFor="auto-hide-on-copy">
+                复制后自动隐藏
+              </label>
+              <input
+                id="auto-hide-on-copy"
+                className="settings-checkbox"
+                type="checkbox"
+                checked={config.auto_hide_on_copy}
+                onChange={(e) =>
+                  setConfig({ ...config, auto_hide_on_copy: e.target.checked })
+                }
+              />
+              <span className="settings-hint">
+                复制成功后自动隐藏主窗口（默认开启，Esc 也可手动隐藏）
+              </span>
+            </div>
+
             <div className="settings-row">
               <label className="settings-label">剪贴板快捷键</label>
-              <input
-                className="settings-input"
-                type="text"
+              <ShortcutInput
                 placeholder="Ctrl+Shift+V"
                 value={config.clipboard_shortcut}
-                onChange={(e) =>
-                  setConfig({ ...config, clipboard_shortcut: e.target.value })
-                }
+                onChange={(v) => setConfig({ ...config, clipboard_shortcut: v })}
               />
             </div>
 
             <div className="settings-row">
               <label className="settings-label">笔记快捷键</label>
-              <input
-                className="settings-input"
-                type="text"
+              <ShortcutInput
                 placeholder="Ctrl+Shift+N"
                 value={config.notes_shortcut}
-                onChange={(e) =>
-                  setConfig({ ...config, notes_shortcut: e.target.value })
-                }
+                onChange={(v) => setConfig({ ...config, notes_shortcut: v })}
               />
             </div>
 
             <div className="settings-row">
               <label className="settings-label">工具快捷键</label>
-              <input
-                className="settings-input"
-                type="text"
+              <ShortcutInput
                 placeholder="Ctrl+Shift+T"
                 value={config.tools_shortcut}
-                onChange={(e) =>
-                  setConfig({ ...config, tools_shortcut: e.target.value })
-                }
+                onChange={(v) => setConfig({ ...config, tools_shortcut: v })}
               />
             </div>
 
             <div className="settings-row">
               <label className="settings-label">截图快捷键</label>
-              <input
-                className="settings-input"
-                type="text"
+              <ShortcutInput
                 placeholder="Ctrl+Shift+S"
                 value={config.screenshot_shortcut}
-                onChange={(e) =>
-                  setConfig({ ...config, screenshot_shortcut: e.target.value })
-                }
+                onChange={(v) => setConfig({ ...config, screenshot_shortcut: v })}
               />
             </div>
 
             <div className="settings-row">
               <label className="settings-label">API 快捷键</label>
-              <input
-                className="settings-input"
-                type="text"
+              <ShortcutInput
                 placeholder="Ctrl+Shift+U"
                 value={config.api_shortcut}
-                onChange={(e) =>
-                  setConfig({ ...config, api_shortcut: e.target.value })
-                }
+                onChange={(v) => setConfig({ ...config, api_shortcut: v })}
               />
             </div>
 
